@@ -1,3 +1,10 @@
+# Command Processor Extension
+
+Right now only the opae driver is fully extended to support a command queue on the host side. Additionally, the sort app has been altered to utilize the new command queue. To run:
+
+```./ci/blackbox.sh --cores=2 --app=sort --rebuild=1 --driver=opae```
+
+
 # Vortex GPGPU
 
 Vortex is a full-stack open-source RISC-V GPGPU. Vortex supports multiple **backend drivers**, including our C++ simulator (simx), an RTL simulator, and physical Xilinx and Altera FPGAs-- all controlled by a single driver script. The chosen driver determines the corresponding code invoked to run Vortex. Generally, developers will prototype their intended design in simx, before completing going forward with an RTL implementation. Alternatively, you can get up and running by selecting a driver of your choice and running a demo program.
