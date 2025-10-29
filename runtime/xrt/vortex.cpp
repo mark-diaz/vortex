@@ -97,6 +97,59 @@ static void dump_xrt_error(xrtDeviceHandle xrtDevice, xrtErrorCode err) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+
+class RingBuffer {
+public:
+    RingBuffer(size_t capacity)
+        : capacity_(capacity), head_(0), tail_(0), size_(0) {
+        buffer_.resize(capacity);
+    }
+
+    bool is_full() const {
+        return size_ == capacity_;
+    }
+
+    bool is_empty() const {
+        return size_ == 0;
+    }
+
+    bool enqueue(const uint8_t* data, size_t len) {
+        if (len > free_space())
+            return false;
+
+        for (size_t i = 0; i < len; ++i) {
+            buffer_[(tail_ + i) % capacity_] = data[i];
+        }
+
+        tail_ = (tail_ + len) % capacity_;
+        size_ += len;
+        return true;
+    }
+
+    size_t dequeue(uint8_t* data, size_t len) {
+        size_t actual_len = std::min(len, size_);
+        for (size_t i = 0; i < actual_len; ++i) {
+            data[i] = buffer_[(head_ + i) % capacity_];
+        }
+
+        head_ = (head_ + actual_len) % capacity_;
+        size_ -= actual_len;
+        return actual_len;
+    }
+
+    size_t free_space() const {
+        return capacity_ - size_;
+    }
+
+    size_t used_space() const {
+        return size_;
+    }
+
+private:
+    std::vector<uint8_t> buffer_;
+    size_t capacity_, head_, tail_, size_;
+};
+
 class vx_device {
 public:
   vx_device()
@@ -104,6 +157,7 @@ public:
                   GLOBAL_MEM_SIZE - ALLOC_BASE_ADDR,
                   RAM_PAGE_SIZE,
                   CACHE_BLOCK_SIZE)
+                  , ring_buffer_(RING_BUFFER_CAPACITY)
   #ifndef CPP_API
     , xrtDevice_(nullptr)
     , xrtKernel_(nullptr)
@@ -130,6 +184,19 @@ public:
     }
   #endif
   }
+
+    int enqueue_command(uint64_t dev_addr, const void* host_ptr, uint64_t size) {
+        const uint8_t* src_data = reinterpret_cast<const uint8_t*>(host_ptr);
+        if (size > ring_buffer_.free_space()) {
+            fprintf(stderr, "[VXDRV] Error: Ring buffer full!\n");
+            return -1;
+        }
+        if (!ring_buffer_.enqueue(src_data, size)) {
+            fprintf(stderr, "[VXDRV] Error: Failed to enqueue data!\n");
+            return -1;
+        }
+        return 0;
+    }
 
   int init() {
     int device_index = DEFAULT_DEVICE_INDEX;
@@ -631,6 +698,8 @@ private:
   uint64_t isa_caps_;
   uint64_t global_mem_size_;
   DeviceConfig dcrs_;
+  static constexpr size_t RING_BUFFER_CAPACITY = 1024 * 1024; // 1 MB buffer
+  RingBuffer ring_buffer_;
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
   uint32_t lg2_num_banks_;
   uint32_t lg2_bank_size_;

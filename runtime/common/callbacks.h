@@ -51,6 +51,11 @@ typedef struct {
   // Copy bytes from host to device memory
   int (*copy_to_dev) (vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);
 
+    // Copy bytes from host to ring buffer / cmd queue
+  int (*copy_to_cmd_queue) (vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);
+
+  int (*vx_flush) (vx_device_h hdevice, uint64_t address);
+
   // Copy bytes from device memory to host
   int (*copy_from_dev) (void* host_ptr, vx_buffer_h hbuffer, uint64_t src_offset, uint64_t size);
 

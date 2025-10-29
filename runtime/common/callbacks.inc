@@ -17,6 +17,8 @@ struct vx_buffer {
   uint64_t size;
 };
 
+
+
 extern int vx_dev_init(callbacks_t* callbacks) {
   if (nullptr == callbacks)
     return -1;
@@ -156,6 +158,23 @@ extern int vx_dev_init(callbacks_t* callbacks) {
       return -1;
     DBGPRINT("COPY_TO_DEV: hbuffer=%p, host_addr=%p, dst_offset=%ld, size=%ld\n", hbuffer, host_ptr, dst_offset, size);
     return device->upload(buffer->addr + dst_offset, host_ptr, size);
+  };
+
+  callbacks->copy_to_cmd_queue = [](vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size) {
+    if (nullptr == hbuffer || nullptr == host_ptr)
+        return -1;
+    auto buffer = ((vx_buffer*)hbuffer);
+    auto device = ((vx_device*)buffer->device);
+    if ((dst_offset + size) > buffer->size)
+        return -1;
+    DBGPRINT("COPY_TO_CMD_QUEUE: hbuffer=%p, host_addr=%p, dst_offset=%ld, size=%ld\n", hbuffer, host_ptr, dst_offset, size);
+    return device->enqueue_command(buffer->addr + dst_offset, host_ptr, size);
+};
+
+  callbacks->vx_flush = [](vx_device_h hdevice, uint64_t address)
+  {
+    auto device = ((vx_device*)hdevice);
+    return device->dev_flush(address);
   };
 
   callbacks->copy_from_dev = [](void* host_ptr, vx_buffer_h hbuffer, uint64_t src_offset, uint64_t size) {

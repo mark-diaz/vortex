@@ -29,6 +29,7 @@
 #include <iostream>
 #include <list>
 #include <memory>
+#include <vector>
 #include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,6 +75,58 @@ using namespace vortex;
 
 ///////////////////////////////////////////////////////////////////////////////
 
+class RingBuffer {
+public:
+    RingBuffer(size_t capacity)
+        : capacity_(capacity), head_(0), tail_(0), size_(0) {
+        buffer_.resize(capacity);
+    }
+
+    bool is_full() const {
+        return size_ == capacity_;
+    }
+
+    bool is_empty() const {
+        return size_ == 0;
+    }
+
+    bool enqueue(const uint8_t* data, size_t len) {
+        if (len > free_space())
+            return false;
+
+        for (size_t i = 0; i < len; ++i) {
+            buffer_[(tail_ + i) % capacity_] = data[i];
+        }
+
+        tail_ = (tail_ + len) % capacity_;
+        size_ += len;
+        return true;
+    }
+
+    size_t dequeue(uint8_t* data, size_t len) {
+        size_t actual_len = std::min(len, size_);
+        for (size_t i = 0; i < actual_len; ++i) {
+            data[i] = buffer_[(head_ + i) % capacity_];
+        }
+
+        head_ = (head_ + actual_len) % capacity_;
+        size_ -= actual_len;
+        return actual_len;
+    }
+
+    size_t free_space() const {
+        return capacity_ - size_;
+    }
+
+    size_t used_space() const {
+        return size_;
+    }
+
+private:
+    std::vector<uint8_t> buffer_;
+    size_t capacity_, head_, tail_, size_;
+};
+
 class vx_device {
 public:
   vx_device()
@@ -86,6 +139,7 @@ public:
     , staging_ioaddr_(0)
     , staging_ptr_(nullptr)
     , staging_size_(0)
+    , ring_buffer_(RING_BUFFER_CAPACITY)
   {}
 
   ~vx_device() {
@@ -101,6 +155,56 @@ public:
     }
     drv_close();
   }
+  // Method to enqueue data into the ring buffer
+  int enqueue_command(uint64_t dev_addr, const void* host_ptr, uint64_t size) {
+        const uint8_t* src_data = reinterpret_cast<const uint8_t*>(host_ptr);
+        if (size > ring_buffer_.free_space()) {
+            fprintf(stderr, "[VXDRV] Error: Ring buffer full!\n");
+            return -1;
+        }
+        if (!ring_buffer_.enqueue(src_data, size)) {
+            fprintf(stderr, "[VXDRV] Error: Failed to enqueue data!\n");
+            return -1;
+        }
+        return 0;
+    }
+
+  int dev_flush(uint64_t dev_addr) {
+      if (ring_buffer_.is_empty()) {
+          fprintf(stderr, "[VXDRV] Warning: Ring buffer is empty, nothing to flush!\n");
+          return 0;
+      }
+
+      // Iterate over the ring buffer and process each command
+      while (!ring_buffer_.is_empty()) {
+          // Get the amount of data available to dequeue
+          size_t cmd_size = ring_buffer_.used_space(); // Size of the data to dequeue
+
+          // Dequeue the command into a temporary buffer
+          std::vector<uint8_t> temp_buffer(cmd_size);
+          size_t dequeued_size = ring_buffer_.dequeue(temp_buffer.data(), cmd_size);
+          if (dequeued_size == 0) {
+              fprintf(stderr, "[VXDRV] Error: Failed to dequeue command!\n");
+              return -1;
+          }
+          
+          // Validate that the dev_addr is set properly (e.g., ensure it's within valid bounds)
+          if (dev_addr == 0) {
+              fprintf(stderr, "[VXDRV] Invalid device address!\n");
+              return -1;
+          }
+
+          // Call the upload function to transfer the data to the device
+          if (upload(dev_addr, temp_buffer.data(), dequeued_size) < 0) {
+              fprintf(stderr, "[VXDRV] Error: Failed to upload command to device!\n");
+              return -1;
+          }
+          fprintf(stdout, "[FLUSH] Kernel successfully flushed!\n");
+      }
+
+      return 0;
+  }
+
 
   int init() {
     fpga_token accel_token;
@@ -532,6 +636,8 @@ private:
   uint64_t staging_ioaddr_;
   uint8_t *staging_ptr_;
   uint64_t staging_size_;
+  static constexpr size_t RING_BUFFER_CAPACITY = 1024 * 1024; // 1 MB buffer
+  RingBuffer ring_buffer_;
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
 };
 
