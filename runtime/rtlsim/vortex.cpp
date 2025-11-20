@@ -184,6 +184,13 @@ public:
     return 0;
   }
 
+  // Final_Project: provide a stub for test_flush in rtlsim backend.
+  // For RTL simulation, map test_flush to a direct upload so common
+  // callbacks can invoke a unified API across backends.
+  int test_flush(uint64_t dev_addr, const void* host_ptr, uint64_t size) {
+    return 0;
+  }
+
   int start(uint64_t krnl_addr, uint64_t args_addr) {
     // ensure prior run completed
     if (future_.valid()) {
@@ -206,6 +213,60 @@ public:
 
     return 0;
   }
+
+//   int test_flush(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
+//     if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
+//       return -1;
+
+//     auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
+
+//     if (dev_addr + asize > global_mem_size_)
+//       return -1;
+
+//     // ensure ready for new command
+//     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+//       return -1;
+
+//     if (this->ensure_staging(asize) != 0)
+//       return -1;
+
+
+//     // Wrapping Test
+//     memcpy(staging_ptr_, host_ptr, size);
+
+//     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
+
+
+//     //uint64_t encode = ((((staging_ioaddr_ >> ls_shift) & 0xFF) << ls_shift) | (0x1)); 
+//     //fprintf(stdout, "[FLUSH]%ld %ld\n", encode, staging_ioaddr_ >> ls_shift);
+
+//     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_TEST_FLUSH, staging_ioaddr_ >> ls_shift), {
+//       return -1;
+//     });
+
+//     //CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG2, asize >> ls_shift), {
+//     //  return -1;
+//     //});
+
+
+
+// //    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG1, dev_addr >> ls_shift), {
+// //      return -1;
+// //    });
+// //
+// //    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG2, asize >> ls_shift), {
+// //      return -1;
+// //    });
+// //
+// //    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_TYPE, CMD_MEM_WRITE), {
+// //      return -1;
+// //    });
+// //
+//     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+//       return -1;
+
+//     return 0;
+//   }
 
   int ready_wait(uint64_t timeout) {
     if (!future_.valid())

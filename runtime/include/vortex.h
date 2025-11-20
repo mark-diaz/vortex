@@ -101,6 +101,18 @@ int vx_mem_info(vx_device_h hdevice, uint64_t* mem_free, uint64_t* mem_used);
 // Copy bytes from host to device memory
 int vx_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);
 
+
+
+
+// Final_Project
+// Copy bytes from host to device memory
+int vx_test_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);
+
+
+
+
+
+
 // Copy bytes from device memory to host
 int vx_copy_from_dev(void* host_ptr, vx_buffer_h hbuffer, uint64_t src_offset, uint64_t size);
 
@@ -135,6 +147,8 @@ int vx_upload_file(vx_device_h hdevice, const char* filename, vx_buffer_h* hbuff
 
 // calculate cooperative threads array occupancy
 int vx_check_occupancy(vx_device_h hdevice, uint32_t group_size, uint32_t* max_localmem);
+
+int vx_send_ring_buffer_dummy (vx_device_h hdevice);
 
 // performance counters
 int vx_dump_perf(vx_device_h hdevice, FILE* stream);

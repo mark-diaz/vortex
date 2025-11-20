@@ -47,6 +47,15 @@ using namespace vortex;
 #define MMIO_CMD_ARG0    (AFU_IMAGE_MMIO_CMD_ARG0 * 4)
 #define MMIO_CMD_ARG1    (AFU_IMAGE_MMIO_CMD_ARG1 * 4)
 #define MMIO_CMD_ARG2    (AFU_IMAGE_MMIO_CMD_ARG2 * 4)
+
+
+// Project
+#define MMIO_TEST_FLUSH  (AFU_IMAGE_MMIO_TEST_FLUSH * 4)
+
+#define MMIO_HOST_RING_BUFFER_BASE_ADDR  (AFU_IMAGE_MMIO_HOST_RING_BUFFER_BASE_ADDR * 4)
+#define MMIO_RING_BUFFER_WPTR (AFU_IMAGE_MMIO_RING_BUFFER_WPTR * 4)
+#define MMIO_RING_BUFFER_RPTR (AFU_IMAGE_MMIO_RING_BUFFER_RPTR * 4)
+
 #define MMIO_STATUS      (AFU_IMAGE_MMIO_STATUS * 4)
 #define MMIO_DEV_CAPS    (AFU_IMAGE_MMIO_DEV_CAPS * 4)
 #define MMIO_ISA_CAPS    (AFU_IMAGE_MMIO_ISA_CAPS * 4)
@@ -86,6 +95,8 @@ public:
     , staging_ioaddr_(0)
     , staging_ptr_(nullptr)
     , staging_size_(0)
+    , ring_buffer_wsid_(0) // Zuoning, dummy RB
+    , ring_buffer_ptr_(nullptr)
   {}
 
   ~vx_device() {
@@ -96,6 +107,10 @@ public:
       if (staging_size_ != 0) {
         api_.fpgaReleaseBuffer(fpga_, staging_wsid_);
         staging_size_ = 0;
+      }
+      if (ring_buffer_wsid_ != 0) { // Zuoning, dummy RB release
+        api_.fpgaReleaseBuffer(fpga_, ring_buffer_wsid_);
+        ring_buffer_wsid_ = 0;
       }
       api_.fpgaClose(fpga_);
     }
@@ -288,6 +303,80 @@ public:
     return 0;
   }
 
+
+
+
+  // Final_Project
+  int test_flush(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
+    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
+      return -1;
+
+    auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
+
+    if (dev_addr + asize > global_mem_size_)
+      return -1;
+
+    // ensure ready for new command
+    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+      return -1;
+
+    if (this->ensure_staging(asize) != 0)
+      return -1;
+
+
+    // Wrapping Test
+    memcpy(staging_ptr_, host_ptr, size);
+
+    auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
+
+
+    //uint64_t encode = ((((staging_ioaddr_ >> ls_shift) & 0xFF) << ls_shift) | (0x1)); 
+    //fprintf(stdout, "[FLUSH]%ld %ld\n", encode, staging_ioaddr_ >> ls_shift);
+
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_TEST_FLUSH, staging_ioaddr_ >> ls_shift), {
+      return -1;
+    });
+
+    //CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG2, asize >> ls_shift), {
+    //  return -1;
+    //});
+
+
+
+//    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG1, dev_addr >> ls_shift), {
+//      return -1;
+//    });
+//
+//    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG2, asize >> ls_shift), {
+//      return -1;
+//    });
+//
+//    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_TYPE, CMD_MEM_WRITE), {
+//      return -1;
+//    });
+//
+    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+      return -1;
+
+    return 0;
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   int upload(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
     // check alignment
     if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
@@ -311,10 +400,30 @@ public:
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
+    // Proj
+    // Copy To FPGA here
+    // Format: fpga_handle handle, uint32_t mmio_num, uint64_t offset, uint64_t value)
+    // Param:
+    //  handle    – [in] Handle to previously opened accelerator resource
+    //  mmio_num  – [in] Number of MMIO space to access
+    //  offset    – [in] Byte offset into MMIO space
+    //  value     – [in] Value to write (64 bit)
+
+
+    fprintf(stdout, "[DEBUG] staging io addr = %ld\n", staging_ioaddr_);
+    fprintf(stdout, "[DEBUG] dev_addr = %ld\n", dev_addr);
+    fprintf(stdout, "[DEBUG] asize = %ld\n", asize);
+    fprintf(stdout, "[DEBUG] ls_shift = %ld\n", ls_shift);
+
+    // Writes: 
+    // MMIO_CMD_ARG0 = 12 * 4
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG0, staging_ioaddr_ >> ls_shift), {
       return -1;
     });
 
+    // Writes: 
+    // MMIO_CMD_ARG1 = 14 * 4
+    // dev_addr >> ls_shift
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG1, dev_addr >> ls_shift), {
       return -1;
     });
@@ -354,18 +463,44 @@ public:
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
+
+    // Writes: 
+    // MMIO_CMD_ARG0 = 12 * 4
+    // staging_ioaddr_ >> ls_shift
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG0, staging_ioaddr_ >> ls_shift), {
       return -1;
     });
+
+    //fprintf(stdout, "[DEBUG] staging_ioaddr_ = %ld\n", staging_ioaddr_);
+    //fprintf(stdout, "[DEBUG] ls_shift = %ld\n", ls_shift);
+    // Writes: 
+    // MMIO_CMD_ARG1 = 14 * 4
+    // dev_addr >> ls_shift
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG1, dev_addr >> ls_shift), {
       return -1;
     });
+    //fprintf(stdout, "[DEBUG] MMIO_CMD_ARG1  = %ld\n", MMIO_CMD_ARG1);
+    //fprintf(stdout, "[DEBUG] dev_addr = %ld\n", dev_addr);
+    //fprintf(stdout, "[DEBUG] ls_shift = %ld\n", ls_shift);
+
+    // Writes:
+    // MMIO_CMD_ARG2 = 16 * 4
+    // asize >> ls_shift
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG2, asize >> ls_shift), {
       return -1;
     });
+    //fprintf(stdout, "[DEBUG] MMIO_CMD_ARG2  = %ld\n", MMIO_CMD_ARG2);
+    //fprintf(stdout, "[DEBUG] asize = %ld\n", asize);
+    //fprintf(stdout, "[DEBUG] ls_shift = %ld\n", ls_shift);
+
+    // Writes:
+    // MMIO_CMD_TYPE = 10 * 4
+    // CMD_MEM_READ = 1  
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_TYPE, CMD_MEM_READ), {
       return -1;
     });
+    //fprintf(stdout, "[DEBUG] MMIO_CMD_TYPE  = %ld\n", MMIO_CMD_TYPE);
+    //fprintf(stdout, "[DEBUG] CMD_MEM_READ = %ld\n", CMD_MEM_READ);
 
     // Wait for the write operation to finish
     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
@@ -391,6 +526,13 @@ public:
     CHECK_ERR(this->dcr_write(VX_DCR_BASE_STARTUP_ARG1, args_addr >> 32), {
       return err;
     });
+
+
+
+
+
+    //fprintf(stdout, "[DEBUG] MMIO_CMD_TYPE  = %d\n", MMIO_CMD_TYPE);
+    //fprintf(stdout, "[DEBUG] CMD_RUN = %d\n", CMD_RUN);
 
     // start execution
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_TYPE, CMD_RUN), {
@@ -494,6 +636,35 @@ public:
     return 0;
   }
 
+  int send_ring_buffer_dummy() {
+    // Allocate pinned buffer on host (if not already allocated)
+    if (ring_buffer_wsid_ == 0) {
+      CHECK_FPGA_ERR(api_.fpgaPrepareBuffer(fpga_, 64, &ring_buffer_ptr_, &ring_buffer_wsid_, 0), { return -1; });
+    }
+
+    // Fill with pattern
+    uint8_t* buf_ptr = (uint8_t*)ring_buffer_ptr_;
+    for (int i = 0; i < 64; ++i)
+        buf_ptr[i] = i < 40 ? i : 0xAA;
+
+    // Get IO address
+    uint64_t ioaddr;
+    CHECK_FPGA_ERR(api_.fpgaGetIOAddress(fpga_, ring_buffer_wsid_, &ioaddr), { return -1; });
+
+    fprintf(stdout, "[VXDRV Zuoning] Ring Buffer: ioaddr=0x%lx, ioaddr=0x%lx\n", ioaddr, ioaddr);
+
+    // Set ring buffer base address
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_HOST_RING_BUFFER_BASE_ADDR, ioaddr), { return -1; });
+
+    // Set write pointer to 1 (one entry)
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_RPTR, 0), { return -1; });
+    // Wait for device to read it
+    // usleep(10000);
+
+    return 0;
+}
+
 private:
 
   int ensure_staging(uint64_t size) {
@@ -532,6 +703,8 @@ private:
   uint64_t staging_ioaddr_;
   uint8_t *staging_ptr_;
   uint64_t staging_size_;
+  uint64_t ring_buffer_wsid_;
+  void *ring_buffer_ptr_;
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
 };
 

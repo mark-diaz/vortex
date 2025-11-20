@@ -135,6 +135,19 @@ extern int vx_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t ds
   return (g_callbacks.copy_to_dev)(hbuffer, host_ptr, dst_offset, size);
 }
 
+
+// Final_Project
+extern int vx_test_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size) {
+  return (g_callbacks.test_flush)(hbuffer, host_ptr, dst_offset, size);
+}
+
+
+extern int vx_send_ring_buffer_dummy (vx_device_h hdevice) {
+    return (g_callbacks.send_ring_buffer_dummy)(hdevice);
+}
+
+
+
 extern int vx_copy_from_dev(void* host_ptr, vx_buffer_h hbuffer, uint64_t src_offset, uint64_t size) {
   return (g_callbacks.copy_from_dev)(host_ptr, hbuffer, src_offset, size);
 }
