@@ -100,6 +100,7 @@ module ccip_std_afu #(
         assign avs_readdata[b]      = local_mem[b].readdata;
         assign avs_readdatavalid[b] = local_mem[b].readdatavalid;
     end
+    
 
     vortex_afu #(
         .NUM_LOCAL_MEM_BANKS(NUM_LOCAL_MEM_BANKS)

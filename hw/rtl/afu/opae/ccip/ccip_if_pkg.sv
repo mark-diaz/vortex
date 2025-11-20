@@ -193,13 +193,15 @@ typedef struct packed {
     logic                valid;          // Request Wr Valid 
 } t_if_ccip_c1_Tx; 
 
+
 // Channel 2 : MMIO Read response
 typedef struct packed { 
     t_ccip_c2_RspMmioHdr    hdr;            // Response Header 
     logic                   mmioRdValid;    // Response Read Valid 
     t_ccip_mmioData         data;           // Response Data 
 } t_if_ccip_c2_Tx; 
-  
+
+
 // Wrap all Tx channels
 typedef struct packed {
     t_if_ccip_c0_Tx      c0; 
