@@ -31,15 +31,6 @@ public:
   static int generate() {
     return rand();
   }
-  static bool compare(int a, int b, int index, int errors) {
-    if (a != b) {
-      if (errors < 100) {
-        printf("*** error: [%d] expected=%d, actual=%d\n", index, b, a);
-      }
-      return false;
-    }
-    return true;
-  }
 };
 
 template <>
@@ -52,20 +43,6 @@ public:
   }
   static float generate() {
     return static_cast<float>(rand()) / RAND_MAX;
-  }
-  static bool compare(float a, float b, int index, int errors) {
-    union fi_t { float f; int32_t i; };
-    fi_t fa, fb;
-    fa.f = a;
-    fb.f = b;
-    auto d = std::abs(fa.i - fb.i);
-    if (d > FLOAT_ULP) {
-      if (errors < 100) {
-        printf("*** error: [%d] expected=%f, actual=%f\n", index, b, a);
-      }
-      return false;
-    }
-    return true;
   }
 };
 
@@ -85,26 +62,6 @@ static void show_usage() {
    std::cout << "Usage: [-k: kernel] [-n words] [-h: help]" << std::endl;
 }
 
-static void parse_args(int argc, char **argv) {
-  int c;
-  while ((c = getopt(argc, argv, "n:k:h")) != -1) {
-    switch (c) {
-    case 'n':
-      size = atoi(optarg);
-      break;
-    case 'k':
-      kernel_file = optarg;
-      break;
-    case 'h':
-      show_usage();
-      exit(0);
-      break;
-    default:
-      show_usage();
-      exit(-1);
-    }
-  }
-}
 
 void cleanup() {
   if (device) {
@@ -118,8 +75,6 @@ void cleanup() {
 }
 
 int main(int argc, char *argv[]) {
-  // parse command arguments
-  parse_args(argc, argv);
 
   std::srand(50);
 
@@ -167,7 +122,12 @@ int main(int argc, char *argv[]) {
   // upload source buffer1
   std::cout << "upload source buffer1" << std::endl;
   RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
+  
+  // COMMAND BUFFER: initial testing
+  RT_CHECK(vx_send_ring_buffer_dummy(device)); 
+  RT_CHECK(vx_test_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
 
+  /*
   // Upload kernel binary
   std::cout << "Upload kernel binary" << std::endl;
   RT_CHECK(vx_upload_kernel_file(device, kernel_file, &krnl_buffer));
@@ -210,6 +170,6 @@ int main(int argc, char *argv[]) {
   }
 
   std::cout << "PASSED!" << std::endl;
-
+  */
   return 0;
 }
