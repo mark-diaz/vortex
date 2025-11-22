@@ -47,6 +47,13 @@ using namespace vortex;
 #define MMIO_CMD_ARG0    (AFU_IMAGE_MMIO_CMD_ARG0 * 4)
 #define MMIO_CMD_ARG1    (AFU_IMAGE_MMIO_CMD_ARG1 * 4)
 #define MMIO_CMD_ARG2    (AFU_IMAGE_MMIO_CMD_ARG2 * 4)
+
+// COMMAND BUFFER
+#define MMIO_FLUSH  (AFU_IMAGE_MMIO_FLUSH * 4)
+#define MMIO_HOST_RING_BUFFER_BASE_ADDR  (AFU_IMAGE_MMIO_HOST_RING_BUFFER_BASE_ADDR * 4)
+#define MMIO_RING_BUFFER_WPTR (AFU_IMAGE_MMIO_RING_BUFFER_WPTR * 4)
+#define MMIO_RING_BUFFER_RPTR (AFU_IMAGE_MMIO_RING_BUFFER_RPTR * 4)
+
 #define MMIO_STATUS      (AFU_IMAGE_MMIO_STATUS * 4)
 #define MMIO_DEV_CAPS    (AFU_IMAGE_MMIO_DEV_CAPS * 4)
 #define MMIO_ISA_CAPS    (AFU_IMAGE_MMIO_ISA_CAPS * 4)
@@ -86,6 +93,9 @@ public:
     , staging_ioaddr_(0)
     , staging_ptr_(nullptr)
     , staging_size_(0)
+    // COMMAND BUFFER: initial testing
+    , ring_buffer_wsid_(0)
+    , ring_buffer_ptr_(nullptr)
   {}
 
   ~vx_device() {
@@ -96,6 +106,10 @@ public:
       if (staging_size_ != 0) {
         api_.fpgaReleaseBuffer(fpga_, staging_wsid_);
         staging_size_ = 0;
+      }
+      if (ring_buffer_wsid_ != 0) { // Zuoning, dummy RB release
+        api_.fpgaReleaseBuffer(fpga_, ring_buffer_wsid_);
+        ring_buffer_wsid_ = 0;
       }
       api_.fpgaClose(fpga_);
     }
@@ -204,6 +218,69 @@ public:
     return 0;
   }
 
+  // COMMAND BUFFER
+  int send_ring_buffer_dummy() {
+    // Allocate pinned buffer on host (if not already allocated)
+    if (ring_buffer_wsid_ == 0) {
+      CHECK_FPGA_ERR(api_.fpgaPrepareBuffer(fpga_, 64, &ring_buffer_ptr_, &ring_buffer_wsid_, 0), { return -1; });
+    }
+
+    // Fill with pattern
+    uint8_t* buf_ptr = (uint8_t*)ring_buffer_ptr_;
+    for (int i = 0; i < 64; ++i)
+        buf_ptr[i] = i < 40 ? i : 0xAA;
+
+    // Get IO address
+    uint64_t ioaddr;
+    CHECK_FPGA_ERR(api_.fpgaGetIOAddress(fpga_, ring_buffer_wsid_, &ioaddr), { return -1; });
+
+    fprintf(stdout, "[VXDRV Zuoning] Ring Buffer: ioaddr=0x%lx, ioaddr=0x%lx\n", ioaddr, ioaddr);
+
+    // Set ring buffer base address
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_HOST_RING_BUFFER_BASE_ADDR, ioaddr), { return -1; });
+
+    // Set write pointer to 1 (one entry)
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_RPTR, 0), { return -1; });
+    // Wait for device to read it
+    // usleep(10000);
+
+    return 0;
+  }
+
+  int flush(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
+    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
+      return -1;
+
+    auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
+
+    if (dev_addr + asize > global_mem_size_)
+      return -1;
+
+    // ensure ready for new command
+    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+      return -1;
+
+    if (this->ensure_staging(asize) != 0)
+      return -1;
+
+
+    // Wrapping Test
+    memcpy(staging_ptr_, host_ptr, size);
+
+    auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
+
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, staging_ioaddr_ >> ls_shift), {
+      return -1;
+    });
+
+    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+      return -1;
+
+    return 0;
+  }
+
+
   int get_caps(uint32_t caps_id, uint64_t * value) {
     uint64_t _value;
     switch (caps_id) {
@@ -310,6 +387,12 @@ public:
     memcpy(staging_ptr_, host_ptr, size);
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
+
+    // COMMAND BUFFER: Debug statements
+    fprintf(stdout, "[DEBUG] staging io addr = %ld\n", staging_ioaddr_);
+    fprintf(stdout, "[DEBUG] dev_addr = %ld\n", dev_addr);
+    fprintf(stdout, "[DEBUG] asize = %ld\n", asize);
+    fprintf(stdout, "[DEBUG] ls_shift = %d\n", ls_shift);
 
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG0, staging_ioaddr_ >> ls_shift), {
       return -1;
@@ -532,6 +615,8 @@ private:
   uint64_t staging_ioaddr_;
   uint8_t *staging_ptr_;
   uint64_t staging_size_;
+  uint64_t ring_buffer_wsid_;
+  void *ring_buffer_ptr_;
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
 };
 

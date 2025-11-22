@@ -21,6 +21,29 @@ extern int vx_dev_init(callbacks_t* callbacks) {
   if (nullptr == callbacks)
     return -1;
 
+  // COMMAND BUFFER: initial testing
+  callbacks->send_ring_buffer_dummy = [](vx_device_h hdevice) {
+    if (nullptr == hdevice)
+      return -1;
+    auto device = ((vx_device*)hdevice);
+    DBGPRINT("SEND_RING_BUFFER_DUMMY: hdevice=%p\n", hdevice);
+    return device->send_ring_buffer_dummy();
+  };
+
+  // Final_Project
+  callbacks->flush = [](vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size) {
+    if (nullptr == hbuffer || nullptr == host_ptr)
+      return -1;
+    auto buffer = ((vx_buffer*)hbuffer);
+    auto device = ((vx_device*)buffer->device);
+    if ((dst_offset + size) > buffer->size)
+      return -1;
+    DBGPRINT("FLUSH: hbuffer=%p, host_addr=%p, dst_offset=%ld, size=%ld\n", hbuffer, host_ptr, dst_offset, size);
+    //return device->upload(buffer->addr + dst_offset, host_ptr, size);
+    
+    return device->flush(buffer->addr + dst_offset, host_ptr, size);
+  };
+
   callbacks->dev_open = [](vx_device_h* hdevice)->int {
     if (nullptr == hdevice)
       return  -1;

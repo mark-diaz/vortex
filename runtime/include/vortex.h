@@ -71,6 +71,10 @@ typedef void* vx_buffer_h;
 #define VX_MEM_READ_WRITE           0x3
 #define VX_MEM_PIN_MEMORY           0x4
 
+// COMMAND BUFFER: initial testing
+int vx_send_ring_buffer_dummy (vx_device_h hdevice);
+int vx_test_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);
+
 // open the device and connect to it
 int vx_dev_open(vx_device_h* hdevice);
 

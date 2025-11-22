@@ -19,6 +19,11 @@
 `include "vortex_afu.vh"
 `endif
 
+// COMMAND BUFFER:
+`include "cmd_dispatch.sv"
+`include "ccip_read_req.sv"
+`include "ccip_write_req.sv"
+
 module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_gpu_pkg::*; #(
     parameter NUM_LOCAL_MEM_BANKS = 2
 ) (
@@ -85,6 +90,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam MMIO_CMD_ARG1      = `AFU_IMAGE_MMIO_CMD_ARG1;
     localparam MMIO_CMD_ARG2      = `AFU_IMAGE_MMIO_CMD_ARG2;
     localparam MMIO_STATUS        = `AFU_IMAGE_MMIO_STATUS;
+
+    // COMMAND BUFFER:
+    localparam MMIO_FLUSH                      = `AFU_IMAGE_MMIO_FLUSH;
+    localparam MMIO_HOST_RING_BUFFER_BASE_ADDR = `AFU_IMAGE_MMIO_HOST_RING_BUFFER_BASE_ADDR;
+    localparam MMIO_RING_BUFFER_WPTR           = `AFU_IMAGE_MMIO_RING_BUFFER_WPTR;
+    localparam MMIO_RING_BUFFER_RPTR           = `AFU_IMAGE_MMIO_RING_BUFFER_RPTR;
 
     localparam COUT_TID_WIDTH     = `CLOG2(VX_MEM_BYTEEN_WIDTH);
     localparam COUT_QUEUE_DATAW   = COUT_TID_WIDTH + 8;
@@ -157,6 +168,23 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     t_if_ccip_c2_Tx mmio_rsp;
     assign af2cp_sTxPort.c2 = mmio_rsp;
+
+    // COMMAND BUFFER:
+    localparam RB_DEPTH = 1024;
+    localparam RB_PTR_WIDTH = `CLOG2(RB_DEPTH);
+    reg[RB_PTR_WIDTH-1:0] ring_buffer_wptr;
+    reg[RB_PTR_WIDTH-1:0] ring_buffer_rptr;
+    reg [63:0] host_ring_buffer_base_addr;
+
+    // Ring buffer read control
+    reg ring_buffer_read_req_valid;
+    wire ring_buffer_read_req_ready;
+    reg ring_buffer_read_pending; // Track outstanding read
+    reg [63:0] ring_buffer_read_data;
+    reg ring_buffer_read_data_valid;
+    
+    // Ready when not pending and CCI-P TX not almost full
+    assign ring_buffer_read_req_ready = !ring_buffer_read_pending && !cp2af_sRxPort.c0TxAlmFull;
 
 `ifdef SCOPE
 
@@ -332,9 +360,53 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     end
 
     // Handle MMIO write requests
+    
+    // COMMAND BUFFER:    
+    reg [63:0] io_addr_packet, io_addr_packet_ctr;
+    reg flush, flush_ctr; 
+
+    // flush: Shouldn't be used for controlling modules below, but used for now
+    // ==> Can use flush variable as part of a state machine if needed
+
+    `UNUSED_VAR (io_addr_packet);
+    `UNUSED_VAR (flush);
+
     always @(posedge clk) begin
-        if (cp2af_sRxPort.c0.mmioWrValid) begin
+
+        flush <= flush_ctr;
+        io_addr_packet <= io_addr_packet_ctr;
+
+        if(reset) begin
+            
+            flush_ctr <= 1'b0;
+            // Ensure ring-buffer state starts from known values
+            ring_buffer_wptr <= '0;
+            ring_buffer_rptr <= '0;
+            host_ring_buffer_base_addr <= '0;
+
+        end else if (cp2af_sRxPort.c0.mmioWrValid) begin
+
             case (mmio_req_hdr.address)
+            MMIO_FLUSH: begin
+                io_addr_packet_ctr <= 64'(cp2af_sRxPort.c0.data);
+                flush_ctr <= 1'b1;
+
+            `ifdef DBG_TRACE_AFU
+                `TRACE(2, ("%t: AFU: MMIO_FLUSH ZZZZZZ: data=0x%h  flush=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush))
+            `endif
+            end
+            MMIO_HOST_RING_BUFFER_BASE_ADDR : begin
+                host_ring_buffer_base_addr <= 64'(cp2af_sRxPort.c0.data);
+                `TRACE(2, ("%t: AFU: MMIO_HOST_RING_BUFFER_BASE_ADDR COMMAND BUFFER: data=0x%h  flush=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush))
+            end
+            MMIO_RING_BUFFER_WPTR : begin
+                ring_buffer_wptr <= RB_PTR_WIDTH'(cp2af_sRxPort.c0.data);
+                `TRACE(2, ("%t: AFU: MMIO_RING_BUFFER_WPTR COMMAND BUFFER: data=0x%h  flush=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush))
+            end
+            MMIO_RING_BUFFER_RPTR : begin
+                ring_buffer_rptr <= RB_PTR_WIDTH'(cp2af_sRxPort.c0.data);
+                `TRACE(2, ("%t: AFU: MMIO_RING_BUFFER_RPTR COMMAND BUFFER: data=0x%h  flush=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush))
+            end
             MMIO_CMD_ARG0: begin
                 cmd_args[0] <= 64'(cp2af_sRxPort.c0.data);
             `ifdef DBG_TRACE_AFU
@@ -372,6 +444,10 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             end
             endcase
         end
+        else begin
+            // Update flush if no hdr response
+            flush_ctr <= '0; 
+        end
     end
 
     // COMMAND FSM ////////////////////////////////////////////////////////////
@@ -379,109 +455,49 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire cmd_mem_rd_done;
     reg  cmd_mem_wr_done;
 
-    reg [RESET_CTR_WIDTH-1:0] vx_reset_ctr;
-    reg  vx_busy_wait;
     reg  vx_reset = 1; // asserted at initialization
     wire vx_busy;
 
     wire is_mmio_wr_cmd = cp2af_sRxPort.c0.mmioWrValid && (MMIO_CMD_TYPE == mmio_req_hdr.address);
     wire [CMD_TYPE_WIDTH-1:0] cmd_type = is_mmio_wr_cmd ? CMD_TYPE_WIDTH'(cp2af_sRxPort.c0.data) : CMD_TYPE_WIDTH'(CMD_IDLE);
 
-    always @(posedge clk) begin
-        if (reset) begin
-            state    <= STATE_IDLE;
-            vx_reset <= 1;
-        end else begin
-            case (state)
-            STATE_IDLE: begin
-                case (cmd_type)
-                CMD_MEM_READ: begin
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t: AFU: Goto STATE MEM_READ: ia=0x%0h addr=0x%0h size=%0d\n", $time, cmd_io_addr, cmd_mem_addr, cmd_data_size))
-                `endif
-                    state <= STATE_MEM_READ;
-                end
-                CMD_MEM_WRITE: begin
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t: AFU: Goto STATE MEM_WRITE: ia=0x%0h addr=0x%0h size=%0d\n", $time, cmd_io_addr, cmd_mem_addr, cmd_data_size))
-                `endif
-                    state <= STATE_MEM_WRITE;
-                end
-                CMD_DCR_WRITE: begin
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t: AFU: Goto STATE DCR_WRITE: addr=0x%0h data=%0d\n", $time, cmd_dcr_addr, cmd_dcr_data))
-                `endif
-                    state <= STATE_DCR_WRITE;
-                end
-                CMD_RUN: begin
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t: AFU: Goto STATE RUN\n", $time))
-                `endif
-                    state <= STATE_RUN;
-                    vx_reset_ctr <= RESET_CTR_WIDTH'(`RESET_DELAY-1);
-					vx_reset <= 1;
-                end
-                default: begin
-                    state <= state;
-                end
-                endcase
-            end
-            STATE_MEM_READ: begin
-                if (cmd_mem_rd_done) begin
-                    state <= STATE_IDLE;
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t: AFU: Goto STATE IDLE\n", $time))
-                `endif
-                end
-            end
-            STATE_MEM_WRITE: begin
-                if (cmd_mem_wr_done) begin
-                    state <= STATE_IDLE;
-                end
-            end
-            STATE_DCR_WRITE: begin
-                state <= STATE_IDLE;
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: Goto STATE IDLE\n", $time))
-            `endif
-            end
-            STATE_RUN: begin
-                if (vx_reset) begin
-                    // wait until the reset network is ready
-					if (vx_reset_ctr == RESET_CTR_WIDTH'(0)) begin
-					`ifdef DBG_TRACE_AFU
-						`TRACE(2, ("%t: AFU: Begin execution\n", $time))
-					`endif
-						vx_busy_wait <= 1;
-						vx_reset <= 0;
-					end
-                end else begin
-                    if (vx_busy_wait) begin
-						// wait until processor goes busy
-						if (vx_busy) begin
-							vx_busy_wait <= 0;
-						end
-					end else begin
-						// wait until the processor is not busy
-						if (~vx_busy) begin
-						`ifdef DBG_TRACE_AFU
-							`TRACE(2, ("%t: AFU: End execution\n", $time))
-                            `TRACE(2, ("%t: AFU: Goto STATE IDLE\n", $time))
-						`endif
-							state <= STATE_IDLE;
-						end
-					end
-                end
-            end
-            default:;
-            endcase
+    // Note: This module includes the COMMAND FSM from the original vortex AFU
+    cmd_dispatch #(
+        .CCI_ADDR_WIDTH(CCI_ADDR_WIDTH),
+        .RESET_CTR_WIDTH(RESET_CTR_WIDTH),
 
-            // ensure reset network initialization
-			if (vx_reset_ctr != RESET_CTR_WIDTH'(0)) begin
-				vx_reset_ctr <= vx_reset_ctr - RESET_CTR_WIDTH'(1);
-			end
-        end
-    end
+        .STATE_IDLE (STATE_IDLE),
+        .STATE_MEM_WRITE(STATE_MEM_WRITE),
+        .STATE_MEM_READ(STATE_MEM_READ),
+        .STATE_RUN(STATE_RUN),
+        .STATE_DCR_WRITE(STATE_DCR_WRITE),
+        .STATE_WIDTH(STATE_WIDTH),
+
+        .CMD_MEM_READ(CMD_MEM_READ),
+        .CMD_MEM_WRITE(CMD_MEM_WRITE),
+        .CMD_DCR_WRITE(CMD_DCR_WRITE),
+        .CMD_RUN(CMD_RUN),
+        .CMD_TYPE_WIDTH(CMD_TYPE_WIDTH)
+
+    ) COMMAND_FSM (
+        .clk              (clk), 
+        .reset            (reset), 
+
+        .cmd_type         (cmd_type),
+        .cmd_mem_rd_done  (cmd_mem_rd_done),
+        .cmd_mem_wr_done  (cmd_mem_wr_done),
+
+        .vx_busy          (vx_busy),
+
+        .cmd_io_addr      (cmd_io_addr),
+        .cmd_mem_addr     (cmd_mem_addr),
+        .cmd_data_size    (cmd_data_size),
+        .cmd_dcr_addr     (cmd_dcr_addr),
+        .cmd_dcr_data     (cmd_dcr_data),
+
+        .output_state     (state),
+        .output_vx_reset  (vx_reset)
+    );
 
     // AVS Controller /////////////////////////////////////////////////////////
 
@@ -723,15 +739,236 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // CCI-P Read Request /////////////////////////////////////////////////////
 
+    /************* FIFO (Kernel) Module: Start here *****************/
+
+    // COMMAND BUFFER:
+
+    wire f_push = flush | ring_buffer_read_data_valid;
+    wire f_pop = '0;
+    wire empty_ker_fifo;
+
+    `UNUSED_VAR (f_pop);
+    `UNUSED_VAR (empty_ker_fifo);
+
+    wire [63:0] io_addr_packet_in = ring_buffer_read_data_valid ? ring_buffer_read_data : io_addr_packet;
+    wire [63:0] io_addr_packet_out;
+    `UNUSED_VAR (io_addr_packet_in);
+    `UNUSED_VAR (io_addr_packet_out);
+
+    VX_fifo_queue #(
+        .DATAW (64)
+    ) FIFO_Kernel (
+        .clk      (clk),
+        .reset    (reset),
+        .push     (f_push),
+        .pop      (f_pop),
+        .data_in  (io_addr_packet_in),
+        .data_out (io_addr_packet_out),
+        .empty    (empty_ker_fifo), 
+
+        `UNUSED_PIN (full),
+        `UNUSED_PIN (alm_empty),
+        `UNUSED_PIN (alm_full),
+        `UNUSED_PIN (size)
+    );
+
+    wire non_empty_ker_fifo = !empty_ker_fifo;
+    /************* FIFO (Kernel) Module: End here *****************/
+
+    /************* Ring Buffer Read Logic: Start here *****************/
+    // COMMAND BUFFER:
+    // Detect when new commands are available in ring buffer
+    wire ring_buffer_has_data = (ring_buffer_wptr != ring_buffer_rptr);
+    
+    // Calculate host memory address for current ring buffer entry
+    // Address = base_addr + (rptr * entry_size)
+    // Since CCI-P uses cache-line addresses (64-byte aligned), we need to convert:
+    // Cache-line address = byte_address >> 6
+    wire [63:0] ring_buffer_byte_addr = host_ring_buffer_base_addr + (64'(ring_buffer_rptr) * 64'd64);
+    wire [CCI_ADDR_WIDTH-1:0] ring_buffer_cl_addr = CCI_ADDR_WIDTH'(ring_buffer_byte_addr >> 6);
+    
+    // Issue read request when there's data and we're ready
+    wire ring_buffer_read_fire = ring_buffer_read_req_valid && ring_buffer_read_req_ready;
+    
+    // Detect ring buffer read responses (use metadata to distinguish)
+    // For simplicity, we use mdata[15:8] == 8'hRB to tag ring buffer reads
+    localparam RB_MDATA_TAG = 8'hAB;
+    wire ring_buffer_rsp_fire = cp2af_sRxPort.c0.rspValid
+                             && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE)
+                             && (cp2af_sRxPort.c0.hdr.mdata[15:8] == RB_MDATA_TAG);
+    
+    always @(posedge clk) begin
+        if (reset) begin
+            ring_buffer_read_req_valid <= 0;
+            ring_buffer_read_pending <= 0;
+            ring_buffer_read_data_valid <= 0;
+        end else begin
+            // Clear data valid after one cycle
+            ring_buffer_read_data_valid <= 0;
+            
+            // Issue new read request when data available and not pending
+            if (ring_buffer_has_data && !ring_buffer_read_pending && !ring_buffer_read_req_valid) begin
+                ring_buffer_read_req_valid <= 1;
+            `ifdef DBG_TRACE_AFU
+                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Req: rptr=%0d, wptr=%0d, cl_addr=0x%0h\n", $time, ring_buffer_rptr, ring_buffer_wptr, ring_buffer_cl_addr))
+            `endif
+            end 
+            
+            // Clear request and mark pending when accepted
+            if (ring_buffer_read_fire) begin
+                ring_buffer_read_req_valid <= 0;
+                ring_buffer_read_pending <= 1;
+            `ifdef DBG_TRACE_AFU
+                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Fire: addr=0x%0h\n", $time, ring_buffer_cl_addr))
+            `endif
+            end
+            
+            // Handle response
+            if (ring_buffer_rsp_fire) begin
+                ring_buffer_read_pending <= 0;
+                ring_buffer_read_data <= cp2af_sRxPort.c0.data[63:0];
+                // advance rptr after consuming an entry
+                ring_buffer_rptr <= ring_buffer_rptr + RB_PTR_WIDTH'(1);
+                ring_buffer_read_data_valid <= 1;
+            `ifdef DBG_TRACE_AFU
+                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Rsp: data=0x%h\n", $time, cp2af_sRxPort.c0.data))
+                `TRACE(2, ("%t: AFU: COMMAND BUFFER: RingBuffer Received Address: addr=0x%0h, data=0x%h \n",
+                    $time,
+                    host_ring_buffer_base_addr + (64'(ring_buffer_rptr) << 6),
+                    cp2af_sRxPort.c0.data))
+            `endif
+            end
+        end
+    end
+    // end
+    /************* Ring Buffer Read Logic: End here *****************/
+    /************* Hardcoded Switch: Start here *****************/
+    
+    // TODO_: Find all instance of switch_hardcode and replace with actual
+    // switch controller
+    wire switch_hardcode = !empty_ker_fifo;
+    wire switch_out_is_command = 1'b1; // True if state of switch is now "command"
+
+    // Note: Shouldn't need a "is_vortex" because if CCIP Write Ctr is managed
+    // by the Command FSM/Command Dispatch, so it wouldn't contest (I think)
+
+    /************* Hardcoded Switch: End here *****************/
+
+    /************* CCIP Packet Processor Module: Start here *****************/
+    reg state_packet_ctr;
+
+    reg [63:0] size_packet = 64'd4; // Temporarily hardcode the number of commands
+    reg [63:0] queue_now;
+    t_ccip_clAddr cci_rd_req_addr_packet;
+
+    // Fire, Wait and Valid
+    wire cci_rd_req_fire_packet;
+    reg cci_rd_req_valid_packet, cci_rd_req_wait_packet;
+    assign cci_rd_req_fire_packet = cci_rd_req_valid_packet && !(cci_rd_req_wait_packet);
+
+    // Request Tag Control
+    wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_req_tag_packet;
+    reg [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr_packet, cci_rd_req_ctr_next_packet;
+    assign cci_rd_req_tag_packet = CCI_RD_QUEUE_TAGW'(cci_rd_req_ctr_packet);
+    assign cci_rd_req_ctr_next_packet = cci_rd_req_ctr_packet + CCI_ADDR_WIDTH'(cci_rd_req_fire_packet ? 1 : 0);
+
+    // Response Tag Control
+    wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_tag_packet;
+    assign cci_rd_rsp_tag_packet = CCI_RD_QUEUE_TAGW'(cp2af_sRxPort.c0.hdr.mdata);
+    `UNUSED_VAR(cci_rd_rsp_tag_packet);
+
+    wire cci_rd_rsp_fire_packet = cp2af_sRxPort.c0.rspValid
+                        && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE)
+                        && (switch_hardcode); // Modified response type
+    reg [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_ctr_packet;
+
+    // Data Packet
+    reg [CCI_DATA_WIDTH-1 : 0] cci_data_test;
+    assign cci_data_test = cp2af_sRxPort.c0.data;
+    
+    // Unused Variables
+    `UNUSED_VAR(cci_rd_req_addr_packet);
+    `UNUSED_VAR(cci_rd_req_fire_packet);
+    `UNUSED_VAR(state_packet_ctr);
+    `UNUSED_VAR(cci_data_test);
+    `UNUSED_VAR(cci_rd_req_ctr_next_packet);
+    `UNUSED_VAR(cci_rd_req_ctr);
+
+    // The FSM
+    always @(posedge clk) begin
+
+      if(reset) begin
+        
+        state_packet_ctr <= 1'b0;
+        queue_now <= 'b0;
+        
+        cci_rd_req_ctr_packet <= '0;
+        cci_rd_rsp_ctr_packet <= '0;
+        cci_rd_req_wait_packet <= 0;
+
+      end else begin
+        // TODO_: Need a proper "start state and end state" (Temporarily
+        // hardcode to avoid segmentation fault)
+        //cci_rd_req_addr_packet <= t_ccip_clAddr'(io_addr_packet);
+        cci_rd_req_addr_packet <= t_ccip_clAddr'(io_addr_packet_out);
+
+        // Check if valid to send request
+        cci_rd_req_valid_packet <= (switch_out_is_command) && (non_empty_ker_fifo) && ((queue_now + 1) < size_packet) && !cp2af_sRxPort.c0TxAlmFull;
+
+        `ifdef DBG_TRACE_AFU
+          if(non_empty_ker_fifo && (queue_now != size_packet)) begin
+            `TRACE(2, ("%t: AFU: Valid_Check (PACKET): flush=%0d, queue_now=%0d, size_packet=%0d, rd_req_valid=%0d, rd_req_fire=%d\n", $time, non_empty_ker_fifo,queue_now,size_packet, cci_rd_req_valid_packet, cci_rd_req_fire_packet))
+          end
+        `endif
+ 
+        // Last batch
+        if(cci_rd_req_fire_packet 
+            && cci_rd_req_tag_packet == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1)) begin
+               cci_rd_req_wait_packet <= 1;
+        end
+
+        // First batch
+        if (cci_rd_rsp_fire_packet
+             && (cci_rd_rsp_ctr_packet == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1))) begin
+                cci_rd_req_wait_packet <= 0; // begin new request batch
+        end
+      end
+
+      // If ready to fire request --> update address and control
+      if (cci_rd_req_fire_packet) begin
+
+          //cci_rd_req_addr_packet <= cci_rd_req_addr_packet + 1;
+          queue_now <= queue_now + 1;
+
+          cci_rd_req_ctr_packet  <= cci_rd_req_ctr_packet + $bits(cci_rd_req_ctr_packet)'(1);
+  
+          `ifdef DBG_TRACE_AFU
+            `TRACE(2, ("%t: AFU: CCI Rd Req (PACKET): addr=0x%0h, tag=0x%0h\n", $time, cci_rd_req_addr_packet, cci_rd_req_tag_packet)) 
+          `endif
+ 
+      end
+
+      // If ready to receive request --> update control only
+      if (cci_rd_rsp_fire_packet) begin
+          cci_rd_rsp_ctr_packet <= cci_rd_rsp_ctr_packet + CCI_RD_QUEUE_TAGW'(1);
+  
+          `ifdef DBG_TRACE_AFU
+            `TRACE(2, ("%t: AFU: CCI Rd Rsp (PACKET): idx=%0d, ctr=%0d, data=0x%h\n", $time, cci_rd_rsp_tag_packet, cci_rd_rsp_ctr_packet, cp2af_sRxPort.c0.data))
+          `endif
+      end
+    end
+
+    /************* CCIP Packet Processor Module: End here *****************/
+
     reg [CCI_ADDR_WIDTH-1:0] cci_mem_wr_req_ctr;
     wire [CCI_ADDR_WIDTH-1:0] cci_mem_wr_req_addr;
     reg [CCI_ADDR_WIDTH-1:0] cci_mem_wr_req_addr_base;
 
     wire cci_rd_req_fire;
     t_ccip_clAddr cci_rd_req_addr;
-    reg cci_rd_req_valid, cci_rd_req_wait;
+    // reg cci_rd_req_valid, cci_rd_req_wait;
     reg [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr;
-    wire [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr_next;
+    // wire [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr_next;
     wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_req_tag;
 
     wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_tag;
@@ -741,17 +978,44 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire [CCI_RD_QUEUE_DATAW-1:0] cci_rdq_din;
     wire cci_rdq_empty;
 
+    // COMMAND BUFFER: 
+    // Unused Signals:
+    `UNUSED_VAR(cci_rd_rsp_ctr);
+
+    // Temporary hardcoded af2cp_sTxPort interface
+    // Note: Should be controlled via Switchs FIFO 
+    // af2cp_sTxPort interface - multiplex between ring buffer, packet, and normal reads
+
     always @(*) begin
-        af2cp_sTxPort.c0.valid       = cci_rd_req_fire;
-        af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
-        af2cp_sTxPort.c0.hdr.address = cci_rd_req_addr;
-        af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'(cci_rd_req_tag);
+        
+        // Priority: ring buffer > packet > normal reads
+        if (ring_buffer_read_fire) begin
+            af2cp_sTxPort.c0.valid       = 1;
+            af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
+            af2cp_sTxPort.c0.hdr.address = t_ccip_clAddr'(ring_buffer_cl_addr);
+            // Tag with RB_MDATA_TAG in upper bits to identify ring buffer responses
+            af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'({RB_MDATA_TAG, 8'(ring_buffer_rptr)});
+        end else if (switch_hardcode) begin
+            af2cp_sTxPort.c0.valid       = cci_rd_req_fire_packet;
+            af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
+            af2cp_sTxPort.c0.hdr.address = cci_rd_req_addr_packet;
+            af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'(cci_rd_req_tag_packet);
+        end else begin
+            af2cp_sTxPort.c0.valid       = cci_rd_req_fire; // Zuoning: this is normal read like vx_copy_to_dev (MEM_WRITE), GPU request to read from Host
+            af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
+            af2cp_sTxPort.c0.hdr.address = cci_rd_req_addr;
+            af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'(cci_rd_req_tag);
+        end
     end
 
     wire cci_mem_wr_req_fire = cci_mem_wr_req_valid && cci_mem_req_ready;
 
+    // COMMAND BUFFER: Modify response fire control (Temporary hardcoded)
+    // Note: Should be controlled via Switchs FIFO as input)
+ 
     wire cci_rd_rsp_fire = cp2af_sRxPort.c0.rspValid
-                        && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE);
+                        && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE)
+                        && (!switch_hardcode);
 
     assign cci_rd_req_tag = CCI_RD_QUEUE_TAGW'(cci_rd_req_ctr);
     assign cci_rd_rsp_tag = CCI_RD_QUEUE_TAGW'(cp2af_sRxPort.c0.hdr.mdata);
@@ -760,101 +1024,57 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     assign cci_rdq_pop  = cci_mem_wr_req_fire;
     assign cci_rdq_din  = {cp2af_sRxPort.c0.data, cci_mem_wr_req_addr_base + CCI_ADDR_WIDTH'(cci_rd_rsp_tag)};
 
-    wire [`CLOG2(CCI_RD_QUEUE_SIZE+1)-1:0] cci_pending_reads;
-    wire cci_pending_reads_full;
-    VX_pending_size #(
-        .SIZE (CCI_RD_QUEUE_SIZE)
-    ) cci_rd_pending_size (
-        .clk   (clk),
-        .reset (reset),
-        .incr  (cci_rd_req_fire),
-        .decr  (cci_rdq_pop),
-        `UNUSED_PIN (empty),
-        `UNUSED_PIN (alm_empty),
-        .full  (cci_pending_reads_full),
-        `UNUSED_PIN (alm_full),
-        .size  (cci_pending_reads)
-    );
-
-    `UNUSED_VAR (cci_pending_reads)
-
-    assign cci_rd_req_ctr_next = cci_rd_req_ctr + CCI_ADDR_WIDTH'(cci_rd_req_fire ? 1 : 0);
-
-    assign cci_rd_req_fire = cci_rd_req_valid && !(cci_rd_req_wait || cci_pending_reads_full);
-
+    // COMMAND BUFFER:
     assign cci_mem_wr_req_valid = !cci_rdq_empty;
-
     assign cci_mem_wr_req_addr = cci_rdq_dout[CCI_ADDR_WIDTH-1:0];
 
-    // Send read requests to CCI
-    always @(posedge clk) begin
-        if (reset) begin
-            cci_rd_req_valid <= 0;
-            cci_rd_req_wait  <= 0;
-        end else begin
-            if ((STATE_IDLE == state)
-             && (CMD_MEM_WRITE == cmd_type)) begin
-                cci_rd_req_valid <= (cmd_data_size != 0);
-                cci_rd_req_wait  <= 0;
-            end
+    ccip_read_req #(
 
-            cci_rd_req_valid <= (STATE_MEM_WRITE == state)
-                             && (cci_rd_req_ctr_next != cmd_data_size)
-                             && !cp2af_sRxPort.c0TxAlmFull;
+      .CCI_RD_WINDOW_SIZE(CCI_RD_WINDOW_SIZE),
+      .CCI_ADDR_WIDTH(CCI_ADDR_WIDTH),    
+      .CCI_RD_QUEUE_SIZE(CCI_RD_QUEUE_SIZE), 
+      .CCI_RD_QUEUE_TAGW(CCI_RD_QUEUE_TAGW), 
 
-            if (cci_rd_req_fire
-             && (cci_rd_req_tag == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1))) begin
-                cci_rd_req_wait <= 1; // end current request batch
-            end
+      .STATE_IDLE(STATE_IDLE),     
+      .STATE_MEM_WRITE(STATE_MEM_WRITE),
+      .STATE_DCR_WRITE(STATE_DCR_WRITE),
+      .STATE_WIDTH(STATE_WIDTH),
+      
+      .CMD_TYPE_WIDTH(CMD_TYPE_WIDTH),
+      .CMD_MEM_WRITE(CMD_MEM_WRITE)
 
-            if (cci_rd_rsp_fire
-             && (cci_rd_rsp_ctr == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1))) begin
-                cci_rd_req_wait <= 0; // begin new request batch
-            end
-        end
+    ) CCIP_READ_CONTROLLER (
 
-        if ((STATE_IDLE == state)
-         && (CMD_MEM_WRITE == cmd_type)) begin
-            cci_rd_req_addr    <= cmd_io_addr;
-            cci_rd_req_ctr     <= '0;
-            cci_rd_rsp_ctr     <= '0;
-            cci_mem_wr_req_ctr <= '0;
-            cci_mem_wr_req_addr_base <= cmd_mem_addr;
-            cmd_mem_wr_done     <= 0;
-        end
+      .clk(clk),
+      .reset( reset ),      
 
-        if (cci_rd_req_fire) begin
-            cci_rd_req_addr <= cci_rd_req_addr + 1;
-            cci_rd_req_ctr  <= cci_rd_req_ctr + $bits(cci_rd_req_ctr)'(1);
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Req: addr=0x%0h, tag=0x%0h, rem=%0d, pending=%0d\n", $time, cci_rd_req_addr, cci_rd_req_tag, (cmd_data_size - cci_rd_req_ctr - 1), cci_pending_reads))
-        `endif
-        end
+      .cmd_type(cmd_type),
+      .cmd_io_addr(cmd_io_addr),
+      .cmd_mem_addr(cmd_mem_addr),
+      .cmd_data_size(cmd_data_size),
+  
+      .cci_mem_wr_req_fire(cci_mem_wr_req_fire),
+      .cci_rd_req_tag(cci_rd_req_tag),
+      .cci_rd_rsp_tag(cci_rd_rsp_tag),
+      .cci_rd_rsp_fire(cci_rd_rsp_fire),
+  
+      .state(state),
+      .c0_data(cp2af_sRxPort.c0.data),
+      .c0TxAlmFull(cp2af_sRxPort.c0TxAlmFull),
 
-        if (cci_rd_rsp_fire) begin
-            cci_rd_rsp_ctr <= cci_rd_rsp_ctr + CCI_RD_QUEUE_TAGW'(1);
-            if (CCI_RD_QUEUE_TAGW'(cci_rd_rsp_ctr) == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1)) begin
-                cci_mem_wr_req_addr_base <= cci_mem_wr_req_addr_base + CCI_ADDR_WIDTH'(CCI_RD_WINDOW_SIZE);
-            end
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Rsp: idx=%0d, ctr=%0d, data=0x%h\n", $time, cci_rd_rsp_tag, cci_rd_rsp_ctr, cp2af_sRxPort.c0.data))
-        `endif
-        end
+      .cci_rdq_pop(cci_rdq_pop),
+  
+      .output_cci_mem_wr_req_ctr(cci_mem_wr_req_ctr),
+      .output_cci_mem_wr_req_addr_base(cci_mem_wr_req_addr_base),
+  
+      .output_cci_rd_req_fire(cci_rd_req_fire),
+      .output_cci_rd_req_addr(cci_rd_req_addr),
+      .output_cci_rd_req_ctr(cci_rd_req_ctr),
+      .output_cci_rd_rsp_ctr(cci_rd_rsp_ctr),
 
-        if (cci_rdq_pop) begin
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Queue Pop: pending=%0d\n", $time, cci_pending_reads))
-        `endif
-        end
-
-        if (cci_mem_wr_req_fire) begin
-            cci_mem_wr_req_ctr <= cci_mem_wr_req_ctr + CCI_ADDR_WIDTH'(1);
-            if (cci_mem_wr_req_ctr == (cmd_data_size-1)) begin
-                cmd_mem_wr_done <= 1;
-            end
-        end
-    end
-
+      .output_cmd_mem_wr_done(cmd_mem_wr_done)
+    );
+ 
     VX_fifo_queue #(
         .DATAW (CCI_RD_QUEUE_DATAW),
         .DEPTH (CCI_RD_QUEUE_SIZE)
@@ -873,6 +1093,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     );
 
 `DEBUG_BLOCK(
+/*
     reg [CCI_RD_WINDOW_SIZE-1:0] dbg_cci_rd_rsp_mask;
     always @(posedge clk) begin
         if (reset) begin
@@ -888,6 +1109,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             end
         end
     end
+*/
 )
 
     // CCI-P Write Request ////////////////////////////////////////////////////
@@ -937,57 +1159,63 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     `UNUSED_VAR (cci_pending_writes)
 
-    assign cci_mem_rd_req_valid = (STATE_MEM_READ == state) && ~cci_mem_rd_req_done;
 
-    assign cci_mem_rsp_ready = ~cp2af_sRxPort.c1TxAlmFull && ~cci_pending_writes_full;
+    assign cci_mem_rd_req_valid = (STATE_MEM_READ == state)
+                               && ~cci_mem_rd_req_done;
 
-    assign cmd_mem_rd_done = cci_wr_req_done && cci_pending_writes_empty;
+    assign cci_mem_rsp_ready = ~cp2af_sRxPort.c1TxAlmFull
+                            && ~cci_pending_writes_full;
 
-    // Send write requests to CCI
-    always @(posedge clk) begin
-        if (reset) begin
-            cci_wr_req_fire <= 0;
-        end else begin
-            cci_wr_req_fire <= cci_mem_rd_rsp_fire;
-        end
+    assign cmd_mem_rd_done = cci_wr_req_done
+                          && cci_pending_writes_empty;
 
-        if ((STATE_IDLE == state)
-        &&  (CMD_MEM_READ == cmd_type)) begin
-            cci_mem_rd_req_ctr  <= '0;
-            cci_mem_rd_req_addr <= cmd_mem_addr;
-            cci_mem_rd_req_done <= 0;
-            cci_wr_req_ctr      <= cmd_data_size;
-            cci_wr_req_done     <= 0;
-        end
 
-        if (cci_mem_rd_req_fire) begin
-            cci_mem_rd_req_addr <= cci_mem_rd_req_addr + CCI_ADDR_WIDTH'(1);
-            cci_mem_rd_req_ctr  <= cci_mem_rd_req_ctr + CCI_ADDR_WIDTH'(1);
-            if (cci_mem_rd_req_ctr == (cmd_data_size-1)) begin
-                cci_mem_rd_req_done <= 1;
-            end
-        end
+    ccip_write_req #(
+      .CCI_ADDR_WIDTH(CCI_ADDR_WIDTH),
+      .CCI_DATA_WIDTH(CCI_DATA_WIDTH),
+      .CCI_RW_PENDING_SIZE(CCI_RW_PENDING_SIZE),
 
-        cci_wr_req_addr <= cmd_io_addr + t_ccip_clAddr'(cci_mem_rsp_tag);
-        cci_wr_req_data <= t_ccip_clData'(cci_mem_rsp_data);
 
-        if (cci_wr_req_fire) begin
-            `ASSERT(cci_wr_req_ctr != 0, ("runtime error"));
-            cci_wr_req_ctr <= cci_wr_req_ctr - CCI_ADDR_WIDTH'(1);
-            if (cci_wr_req_ctr == CCI_ADDR_WIDTH'(1)) begin
-            cci_wr_req_done <= 1;
-            end
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Wr Req: addr=0x%0h, rem=%0d, pending=%0d, data=0x%h\n", $time, cci_wr_req_addr, (cci_wr_req_ctr - 1), cci_pending_writes, af2cp_sTxPort.c1.data))
-        `endif
-        end
+      .STATE_IDLE(STATE_IDLE),
+      .STATE_DCR_WRITE(STATE_DCR_WRITE),
+      .STATE_WIDTH(STATE_WIDTH),
 
-        if (cci_wr_rsp_fire) begin
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Wr Rsp: pending=%0d\n", $time, cci_pending_writes))
-        `endif
-        end
-    end
+      .CMD_TYPE_WIDTH(CMD_TYPE_WIDTH),
+      .CMD_MEM_READ(CMD_MEM_READ)
+
+    ) CCIP_WRITE_FSM (
+
+      .clk(clk),
+      .reset(reset),
+      
+      .cmd_type(cmd_type),
+      .cmd_io_addr(cmd_io_addr),
+      .cmd_mem_addr(cmd_mem_addr),
+      .cmd_data_size(cmd_data_size),
+
+      .cci_mem_rd_req_fire(cci_mem_rd_req_fire),
+      .cci_mem_rd_rsp_fire(cci_mem_rd_rsp_fire),
+      .cci_wr_rsp_fire(cci_wr_rsp_fire),
+  
+      .cci_mem_rsp_tag(cci_mem_rsp_tag),
+      .cci_mem_rsp_data(cci_mem_rsp_data),
+
+      .state(state),
+      .c1_data(af2cp_sTxPort.c1.data),
+
+      .cci_pending_writes(cci_pending_writes),
+
+      .output_cci_wr_req_fire(cci_wr_req_fire),
+      .output_cci_wr_req_done(cci_wr_req_done),
+      .output_cci_mem_rd_req_ctr(cci_mem_rd_req_ctr),
+      .output_cci_mem_rd_req_addr(cci_mem_rd_req_addr),
+      .output_cci_mem_rd_req_done(cci_mem_rd_req_done),
+      .output_cci_wr_req_ctr(cci_wr_req_ctr),
+      .output_cci_wr_req_addr(cci_wr_req_addr),
+      .output_cci_wr_req_data(cci_wr_req_data)
+
+    );
+    `UNUSED_VAR (cci_wr_req_ctr)
 
     //--
 

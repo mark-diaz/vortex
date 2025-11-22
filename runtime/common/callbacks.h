@@ -21,6 +21,11 @@ extern "C" {
 #endif
 
 typedef struct {
+
+  // COMMAND BUFFER: initial testing
+  int (*send_ring_buffer_dummy) (vx_device_h hdevice);
+  int (*flush) (vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);
+
   // open the device and connect to it
   int (*dev_open) (vx_device_h* hdevice);
 

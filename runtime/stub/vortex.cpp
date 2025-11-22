@@ -103,6 +103,15 @@ extern int vx_dev_close(vx_device_h hdevice) {
   return ret;
 }
 
+// COMMAND BUFFER: initial testing
+extern int vx_send_ring_buffer_dummy (vx_device_h hdevice) {
+    return (g_callbacks.send_ring_buffer_dummy)(hdevice);
+}
+
+extern int vx_test_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size) {
+  return (g_callbacks.flush)(hbuffer, host_ptr, dst_offset, size);
+}
+
 extern int vx_dev_caps(vx_device_h hdevice, uint32_t caps_id, uint64_t* value) {
   return (g_callbacks.dev_caps)(hdevice, caps_id, value);
 }

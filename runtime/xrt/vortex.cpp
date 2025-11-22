@@ -279,6 +279,18 @@ public:
     return 0;
   }
 
+  // COMMAND BUFFER: stub
+  int send_ring_buffer_dummy() {
+    return 0;
+  }
+
+  int flush(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
+    (void)dev_addr;   // Cast to void to mark as intentionally unused
+    (void)host_ptr;
+    (void)size;
+    return 0;
+  }
+
   int get_caps(uint32_t caps_id, uint64_t *value) {
     uint64_t _value;
 
