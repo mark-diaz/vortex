@@ -57,11 +57,6 @@ vx_buffer_h krnl_buffer = nullptr;
 vx_buffer_h args_buffer = nullptr;
 kernel_arg_t kernel_arg = {};
 
-static void show_usage() {
-   std::cout << "Vortex Test." << std::endl;
-   std::cout << "Usage: [-k: kernel] [-n words] [-h: help]" << std::endl;
-}
-
 
 void cleanup() {
   if (device) {
@@ -74,7 +69,7 @@ void cleanup() {
   }
 }
 
-int main(int argc, char *argv[]) {
+int main() {
 
   std::srand(50);
 
@@ -120,12 +115,12 @@ int main(int argc, char *argv[]) {
   RT_CHECK(vx_copy_to_dev(src0_buffer, h_src0.data(), 0, buf_size));
 
   // upload source buffer1
-  std::cout << "upload source buffer1" << std::endl;
-  RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
+  // std::cout << "upload source buffer1" << std::endl;
+  // RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
   
   // COMMAND BUFFER: initial testing
-  RT_CHECK(vx_send_ring_buffer_dummy(device)); 
-  RT_CHECK(vx_test_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
+  // RT_CHECK(vx_send_ring_buffer_dummy(device)); 
+  // RT_CHECK(vx_test_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
 
   /*
   // Upload kernel binary

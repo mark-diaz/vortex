@@ -797,6 +797,26 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                              && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE)
                              && (cp2af_sRxPort.c0.hdr.mdata[15:8] == RB_MDATA_TAG);
     
+    // Decode helpers
+    wire [511:0] cache_line = cp2af_sRxPort.c0.data; //{<<8{cp2af_sRxPort.c0.data}}
+    wire [31:0] rb_cmd_type = cache_line[31:0];
+
+    // 40-byte payload starting at byte offset 4
+    
+    // localparam int LS_SHIFT = 6;
+
+    wire [191:0] rb_payload = cache_line[223:32];
+    wire [63:0] cmd_arg2 = (rb_payload[191:128]); // << LS_SHIFT
+    wire [63:0] cmd_arg1 = (rb_payload[127:64]);
+    wire [63:0] cmd_arg0 = (rb_payload[63:0]);
+
+    `UNUSED_VAR (cache_line);
+    `UNUSED_VAR (rb_cmd_type);
+    `UNUSED_VAR (rb_payload);
+    `UNUSED_VAR (cmd_arg0);
+    `UNUSED_VAR (cmd_arg1);
+    `UNUSED_VAR (cmd_arg2);
+
     always @(posedge clk) begin
         if (reset) begin
             ring_buffer_read_req_valid <= 0;
@@ -819,7 +839,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 ring_buffer_read_req_valid <= 0;
                 ring_buffer_read_pending <= 1;
             `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Fire: addr=0x%0h\n", $time, ring_buffer_cl_addr))
+                `TRACE(2, ("%t: AFU: COMMAND BUFFER HW: Ring Buffer Read Fire: addr=0x%0h\n", $time, ring_buffer_cl_addr))
             `endif
             end
             
@@ -831,11 +851,13 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 ring_buffer_rptr <= ring_buffer_rptr + RB_PTR_WIDTH'(1);
                 ring_buffer_read_data_valid <= 1;
             `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Rsp: data=0x%h\n", $time, cp2af_sRxPort.c0.data))
-                `TRACE(2, ("%t: AFU: COMMAND BUFFER: RingBuffer Received Address: addr=0x%0h, data=0x%h \n",
-                    $time,
-                    host_ring_buffer_base_addr + (64'(ring_buffer_rptr) << 6),
-                    cp2af_sRxPort.c0.data))
+                // `TRACE(2, ("%t: AFU: COMMAND BUFFER: Read Rsp: data=0x%h\n", $time, cp2af_sRxPort.c0.data))
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] - Received Address: addr=0x%0h, data=0x%h \n", $time, host_ring_buffer_base_addr + (64'(ring_buffer_rptr) << 6), cp2af_sRxPort.c0.data))
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_TYPE: cmd=0x%08h\n", $time, rb_cmd_type));
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_arg0));
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_arg1));
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_arg2));
+
             `endif
             end
         end

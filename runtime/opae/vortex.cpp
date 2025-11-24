@@ -38,10 +38,12 @@
 
 using namespace vortex;
 
-#define CMD_MEM_READ     AFU_IMAGE_CMD_MEM_READ
-#define CMD_MEM_WRITE    AFU_IMAGE_CMD_MEM_WRITE
-#define CMD_RUN          AFU_IMAGE_CMD_RUN
-#define CMD_DCR_WRITE    AFU_IMAGE_CMD_DCR_WRITE
+#define CMD_MEM_READ            AFU_IMAGE_CMD_MEM_READ
+#define CMD_MEM_WRITE           AFU_IMAGE_CMD_MEM_WRITE
+#define CMD_RUN                 AFU_IMAGE_CMD_RUN
+#define CMD_DCR_WRITE           AFU_IMAGE_CMD_DCR_WRITE
+// COMMAND BUFFER: TODO: proposed extension - embedded write
+// #define CMD_MEM_INLINE_WRITE    AFU_IMAGE_CMD_MEM_INLINE_WRITE
 
 #define MMIO_CMD_TYPE    (AFU_IMAGE_MMIO_CMD_TYPE * 4)
 #define MMIO_CMD_ARG0    (AFU_IMAGE_MMIO_CMD_ARG0 * 4)
@@ -81,6 +83,86 @@ using namespace vortex;
 
 ///////////////////////////////////////////////////////////////////////////////
 
+// COMMAND BUFFER:
+
+// note: vortex.h: CACHE_BLOCK_SIZE = 64
+class CommandBuffer {
+public:
+
+  struct CmdHeader {
+    uint32_t cmd_type;  // 3-bit opcode, rest reserved
+  };
+
+  CommandBuffer(uint8_t* base, size_t capacity, size_t cache_block_size)
+    : base_addr_(base)
+    , capacity_(capacity)
+    , cache_block_size_(cache_block_size)
+    , head_(0)
+    , tail_(0)
+    , curr_offset_(0)
+    , size_(0)
+  {}
+
+  bool push_command(uint32_t cmd_type, const void* payload, size_t payload_size) {
+    CmdHeader hdr = { cmd_type };
+    size_t total = sizeof(CmdHeader) + payload_size;
+
+    // enforce "one command per cache block" rule
+    if (curr_offset_ + total > cache_block_size_) {
+      size_t pad = cache_block_size_ - curr_offset_;
+      if (!write_bytes(nullptr, pad))  // zero pad
+        return false;
+      curr_offset_ = 0;
+    }
+
+    if (!write_bytes(&hdr, sizeof(CmdHeader)))
+      return false;
+
+    if (!write_bytes(payload, payload_size))
+      return false;
+
+    curr_offset_ += total;
+    return true;
+  }
+
+  size_t used_space() const {
+    return size_;
+  }
+
+  uint8_t* data() {
+    return base_addr_;
+  }
+
+private:
+
+  bool write_bytes(const void* src, size_t len) {
+    if (len > free_space())
+      return false;
+
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(src);
+
+    for (size_t i = 0; i < len; ++i) {
+      uint8_t v = p ? p[i] : 0;
+      base_addr_[(tail_ + i) % capacity_] = v;
+    }
+
+    tail_ = (tail_ + len) % capacity_;
+    size_ += len;
+    return true;
+  }
+
+  size_t free_space() const {
+    return capacity_ - size_;
+  }
+
+  uint8_t* base_addr_;   // Pinned Memory
+  size_t capacity_;
+  size_t cache_block_size_;
+  size_t head_, tail_;
+  size_t curr_offset_;
+  size_t size_;
+};
+
 class vx_device {
 public:
   vx_device()
@@ -94,8 +176,10 @@ public:
     , staging_ptr_(nullptr)
     , staging_size_(0)
     // COMMAND BUFFER: initial testing
-    , ring_buffer_wsid_(0)
-    , ring_buffer_ptr_(nullptr)
+    , cmd_buffer_wsid_(0)
+    , cmd_buffer_ptr_(nullptr)
+    , cmd_buffer_ioaddr_(0)
+    , cmd_buffer_(nullptr, 0, CACHE_BLOCK_SIZE)
   {}
 
   ~vx_device() {
@@ -107,9 +191,10 @@ public:
         api_.fpgaReleaseBuffer(fpga_, staging_wsid_);
         staging_size_ = 0;
       }
-      if (ring_buffer_wsid_ != 0) { // Zuoning, dummy RB release
-        api_.fpgaReleaseBuffer(fpga_, ring_buffer_wsid_);
-        ring_buffer_wsid_ = 0;
+      // Deallocate Pinned Command Buffer
+      if (cmd_buffer_wsid_ != 0) {
+        api_.fpgaReleaseBuffer(fpga_, cmd_buffer_wsid_);
+        cmd_buffer_wsid_ = 0;
       }
       api_.fpgaClose(fpga_);
     }
@@ -175,6 +260,30 @@ public:
       api_.fpgaClose(fpga_);
       return -1;
     });
+    
+    // COMMAND BUFFER:
+    CHECK_FPGA_ERR(api_.fpgaPrepareBuffer(fpga_, CMD_BUFFER_CAPACITY, &cmd_buffer_ptr_, &cmd_buffer_wsid_, 0), {
+      return -1;});
+
+    // Get IO address that AFU uses for DMA
+    CHECK_FPGA_ERR(api_.fpgaGetIOAddress(fpga_, cmd_buffer_wsid_, &cmd_buffer_ioaddr_), {
+      api_.fpgaReleaseBuffer(fpga_, cmd_buffer_wsid_);
+      cmd_buffer_wsid_ = 0;
+      return -1;});
+
+    // Inform AFU where host command buffer lives
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_HOST_RING_BUFFER_BASE_ADDR, cmd_buffer_ioaddr_), {
+      return -1;});
+
+    // Construct command buffer interface over pinned memory
+    cmd_buffer_ = CommandBuffer(
+      reinterpret_cast<uint8_t*>(cmd_buffer_ptr_),
+      CMD_BUFFER_CAPACITY,
+      CACHE_BLOCK_SIZE
+    );
+
+    // Debug message
+    fprintf(stdout, "[VXDRV] Command Buffer allocated: CPU ptr=%p, IO=0x%lx, size=%lu bytes\n", cmd_buffer_ptr_, cmd_buffer_ioaddr_, CMD_BUFFER_CAPACITY);
 
     {
       // Load ISA CAPS
@@ -218,35 +327,46 @@ public:
     return 0;
   }
 
-  // COMMAND BUFFER
+  // COMMAND BUFFER: this is an example of sending a write to memory
   int send_ring_buffer_dummy() {
-    // Allocate pinned buffer on host (if not already allocated)
-    if (ring_buffer_wsid_ == 0) {
-      CHECK_FPGA_ERR(api_.fpgaPrepareBuffer(fpga_, 64, &ring_buffer_ptr_, &ring_buffer_wsid_, 0), { return -1; });
-    }
+  // 1. Build a fake payload (fits inside one cache block)
+  uint8_t payload[40];
 
-    // Fill with pattern
-    uint8_t* buf_ptr = (uint8_t*)ring_buffer_ptr_;
-    for (int i = 0; i < 64; ++i)
-        buf_ptr[i] = i < 40 ? i : 0xAA;
-
-    // Get IO address
-    uint64_t ioaddr;
-    CHECK_FPGA_ERR(api_.fpgaGetIOAddress(fpga_, ring_buffer_wsid_, &ioaddr), { return -1; });
-
-    fprintf(stdout, "[VXDRV Zuoning] Ring Buffer: ioaddr=0x%lx, ioaddr=0x%lx\n", ioaddr, ioaddr);
-
-    // Set ring buffer base address
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_HOST_RING_BUFFER_BASE_ADDR, ioaddr), { return -1; });
-
-    // Set write pointer to 1 (one entry)
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_RPTR, 0), { return -1; });
-    // Wait for device to read it
-    // usleep(10000);
-
-    return 0;
+  // First 24 bytes = DEADBEEF pattern
+  for (int i = 0; i < 24; ++i) {
+      static const uint8_t pattern[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+      payload[i] = pattern[i & 3];
   }
+
+  // Last 16 bytes = incremental 0..15
+  for (int i = 24; i < 40; ++i) {
+      payload[i] = i - 24;
+  }
+
+  // 2. Write command + payload into pinned command buffer
+  bool ok = cmd_buffer_.push_command(
+      CMD_MEM_WRITE,   // dummy opcode
+      payload,         // dummy payload
+      sizeof(payload)
+  );
+
+  if (!ok) {
+    fprintf(stderr, "[VXDRV] CommandBuffer: push_command failed\n");
+    return -1;
+  }
+
+  // 3. Write WPTR so AFU sees the new command
+  size_t wptr = cmd_buffer_.used_space();
+
+  CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
+  CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_RPTR, 0), { return -1; });
+  fprintf(stdout, "[VXDRV] Dummy command written: payload=40 bytes, wptr=%zu, base=0x%lx\n", wptr, cmd_buffer_ioaddr_);
+
+  CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, 1 ), { return -1; });
+  // 4. Debug
+
+  return 0;
+}
 
   int flush(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
     if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
@@ -279,7 +399,6 @@ public:
 
     return 0;
   }
-
 
   int get_caps(uint32_t caps_id, uint64_t * value) {
     uint64_t _value;
@@ -389,6 +508,69 @@ public:
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
     // COMMAND BUFFER: Debug statements
+
+
+    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG0 (hex): 0x%016lx\n", staging_ioaddr_);
+    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG1 (hex): 0x%016lx\n", dev_addr);
+    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG2 (hex): 0x%016lx\n", asize);
+    fprintf(stdout, "[COMMAND BUFFER SW] ls_shift = %d\n", ls_shift);
+
+
+    // uint64_t arg0 = staging_ioaddr_ >> ls_shift;
+    // uint64_t arg1 = dev_addr        >> ls_shift;
+    // uint64_t arg2 = asize           >> ls_shift;
+    
+    uint64_t arg0 = staging_ioaddr_;
+    uint64_t arg1 = dev_addr;
+    uint64_t arg2 = asize;
+    // --- Build 24-byte payload ---
+    uint8_t payload[24];
+
+    memcpy(payload + 0,  &arg0, 8);
+    memcpy(payload + 8,  &arg1, 8);
+    memcpy(payload + 16, &arg2, 8);
+
+    // --- Push command into command buffer ---
+    if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
+      return -1;
+
+    // --- Update write pointer for hardware ---
+    // size_t wptr = cmd_buffer_.used_space();
+
+    // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), {
+    //     return -1;
+    // });
+
+    flush_commands();
+
+    return 0;
+  }
+  
+  /*
+  int upload(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
+    // check alignment
+    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
+      return -1;
+
+    auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
+
+    // bound checking
+    if (dev_addr + asize > global_mem_size_)
+      return -1;
+
+    // ensure ready for new command
+    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+      return -1;
+
+    if (this->ensure_staging(asize) != 0)
+      return -1;
+
+    // update staging buffer
+    memcpy(staging_ptr_, host_ptr, size);
+
+    auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
+
+    // COMMAND BUFFER: Debug statements
     fprintf(stdout, "[DEBUG] staging io addr = %ld\n", staging_ioaddr_);
     fprintf(stdout, "[DEBUG] dev_addr = %ld\n", dev_addr);
     fprintf(stdout, "[DEBUG] asize = %ld\n", asize);
@@ -416,6 +598,7 @@ public:
 
     return 0;
   }
+  */
 
   int download(void *host_ptr, uint64_t dev_addr, uint64_t size) {
     // check alignment
@@ -579,6 +762,26 @@ public:
 
 private:
 
+  // Command Buffer:
+  bool enqueue_command(uint32_t cmd_type, const void* payload, size_t payload_size) {
+    
+    if (!cmd_buffer_.push_command(cmd_type, payload, payload_size))
+        return false;
+
+    // size_t wptr = cmd_buffer_.used_space();
+
+    // TODO: change from 1 to wptr
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
+
+    return true;
+  }
+
+
+  int flush_commands() {
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, 1), { return -1; });
+    return 0;
+  }
+
   int ensure_staging(uint64_t size) {
     if (staging_size_ >= size)
       return 0;
@@ -615,9 +818,14 @@ private:
   uint64_t staging_ioaddr_;
   uint8_t *staging_ptr_;
   uint64_t staging_size_;
-  uint64_t ring_buffer_wsid_;
-  void *ring_buffer_ptr_;
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
+
+  // COMMAND BUFFER:
+  uint64_t cmd_buffer_wsid_;
+  void*    cmd_buffer_ptr_;
+  uint64_t cmd_buffer_ioaddr_;
+  CommandBuffer cmd_buffer_;
+  static constexpr size_t CMD_BUFFER_CAPACITY = 1024 * 1024; // 1 MB
 };
 
 #include <callbacks.inc>
