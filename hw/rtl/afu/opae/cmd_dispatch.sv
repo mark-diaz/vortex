@@ -63,6 +63,10 @@ module cmd_dispatch import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import V
     output logic            output_vx_reset
 );
 
+    // Silence unused parameter warnings (if any) without breaking port list syntax
+    // Moved from inside the port list where it was invalid.
+    localparam int _unused_cmd_mem_read = CMD_MEM_READ;
+
 
     // Unused Variables
     `UNUSED_VAR(cmd_io_addr);
@@ -85,7 +89,8 @@ module cmd_dispatch import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import V
         end else begin
             case (state)
             STATE_IDLE: begin
-                case (cmd_type)
+                case (cmd_type) 
+                    // Zuoning, this look at cmd_type register and decide whether it is a mem read or mem write
 
                 CMD_MEM_READ: begin
                 `ifdef DBG_TRACE_AFU

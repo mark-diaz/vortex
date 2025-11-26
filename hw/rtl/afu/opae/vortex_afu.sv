@@ -79,6 +79,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam AFU_ID_H           = 16'h0004;      // AFU ID Higher
 
     localparam CMD_IDLE           = 0;
+    `UNUSED_PARAM(CMD_IDLE);
     localparam CMD_MEM_READ       = `AFU_IMAGE_CMD_MEM_READ;
     localparam CMD_MEM_WRITE      = `AFU_IMAGE_CMD_MEM_WRITE;
     localparam CMD_DCR_WRITE      = `AFU_IMAGE_CMD_DCR_WRITE;
@@ -96,6 +97,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam MMIO_HOST_RING_BUFFER_BASE_ADDR = `AFU_IMAGE_MMIO_HOST_RING_BUFFER_BASE_ADDR;
     localparam MMIO_RING_BUFFER_WPTR           = `AFU_IMAGE_MMIO_RING_BUFFER_WPTR;
     localparam MMIO_RING_BUFFER_RPTR           = `AFU_IMAGE_MMIO_RING_BUFFER_RPTR;
+    localparam MMIO_RING_BUFFER_NUM_CMD_REMAINING = `AFU_IMAGE_MMIO_RING_BUFFER_NUM_CMD_REMAINING;
 
     localparam COUT_TID_WIDTH     = `CLOG2(VX_MEM_BYTEEN_WIDTH);
     localparam COUT_QUEUE_DATAW   = COUT_TID_WIDTH + 8;
@@ -114,6 +116,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam STATE_RUN          = 3;
     localparam STATE_DCR_WRITE    = 4;
     localparam STATE_WIDTH        = `CLOG2(STATE_DCR_WRITE+1);
+    localparam MAX_RING_BUFFER_CMDS = 16; // Zuoning
+    localparam MAX_RING_BUFFER_CMDS_WIDTH = `CLOG2(MAX_RING_BUFFER_CMDS);
+    localparam CMD_HEADER_WIDTH = 4*8; // Zuoning
+    localparam CMD_ARG0_WIDTH = 8*8; // Zuoning
+    localparam CMD_ARG1_WIDTH = 8*8; // Zuoning
+    localparam CMD_ARG2_WIDTH = 8*8; // Zuoning
 
     wire [127:0] afu_id = `AFU_ACCEL_UUID;
 
@@ -130,7 +138,15 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                             2'(`CLOG2(`XLEN)-4),
                             30'(`MISA_STD)};
 
+    // ZUONING 
     reg [STATE_WIDTH-1:0] state;
+    reg [MAX_RING_BUFFER_CMDS_WIDTH-1:0] ring_buffer_num_cmds_remaining;
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire [CMD_HEADER_WIDTH-1:0] cmd_header;
+    /* verilator lint_on UNUSEDSIGNAL */
+    // wire [CMD_ARG0_WIDTH-1:0] cmd_arg0;
+    // wire [CMD_ARG1_WIDTH-1:0] cmd_arg1;
+    // wire [CMD_ARG2_WIDTH-1:0] cmd_arg2;
 
     // Vortex ports ///////////////////////////////////////////////////////////
 
@@ -149,7 +165,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // CMD variables //////////////////////////////////////////////////////////
 
-    reg [2:0][63:0] cmd_args;
+    // Separate signals for MMIO and FIFO command arguments
+
+    reg [2:0][63:0] mmio_cmd_args;  // For MMIO writes (non-blocking)
+    `UNUSED_VAR (mmio_cmd_args)
+    wire [2:0][63:0] fifo_cmd_args; // For FIFO output (continuous assign)
+    wire [2:0][63:0] cmd_args;      // Muxed output (assigned later)
 
     t_ccip_clAddr cmd_io_addr;
     assign cmd_io_addr = t_ccip_clAddr'(cmd_args[0]);
@@ -180,7 +201,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     reg ring_buffer_read_req_valid;
     wire ring_buffer_read_req_ready;
     reg ring_buffer_read_pending; // Track outstanding read
-    reg [63:0] ring_buffer_read_data;
+    reg [CCI_DATA_WIDTH-1:0] ring_buffer_read_data;
     reg ring_buffer_read_data_valid;
     
     // Ready when not pending and CCI-P TX not almost full
@@ -362,7 +383,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // Handle MMIO write requests
     
     // COMMAND BUFFER:    
-    reg [63:0] io_addr_packet, io_addr_packet_ctr;
+    reg [CCI_DATA_WIDTH-1:0] io_addr_packet, io_addr_packet_ctr;
     reg flush, flush_ctr; 
 
     // flush: Shouldn't be used for controlling modules below, but used for now
@@ -372,28 +393,36 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     `UNUSED_VAR (flush);
 
     always @(posedge clk) begin
-
+        // Update flush unconditionally from flush_ctr
         flush <= flush_ctr;
+        if (flush_ctr) begin
+             `TRACE(2, ("%t: [COMMAND BUFFER HW] : Setting flush to flush=%d \n", $time, flush_ctr))
+        end
+        
         io_addr_packet <= io_addr_packet_ctr;
 
         if(reset) begin
             
             flush_ctr <= 1'b0;
+            flush <= 1'b0;
             // Ensure ring-buffer state starts from known values
             ring_buffer_wptr <= '0;
             ring_buffer_rptr <= '0;
             host_ring_buffer_base_addr <= '0;
+            ring_buffer_num_cmds_remaining <= 0;
 
         end else if (cp2af_sRxPort.c0.mmioWrValid) begin
 
             case (mmio_req_hdr.address)
             MMIO_FLUSH: begin
-                io_addr_packet_ctr <= 64'(cp2af_sRxPort.c0.data);
+                // io_addr_packet_ctr <= 64'(cp2af_sRxPort.c0.data);
+                io_addr_packet_ctr <= cp2af_sRxPort.c0.data;
+
                 flush_ctr <= 1'b1;
 
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_FLUSH ZZZZZZ: data=0x%h  flush=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush))
-            `endif
+            
+                `TRACE(2, ("%t: AFU: MMIO_FLUSH ZZZZZZ: data=0x%h  flush=%d . cmd_fifo_empty=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush, cmd_fifo_empty))
+            
             end
             MMIO_HOST_RING_BUFFER_BASE_ADDR : begin
                 host_ring_buffer_base_addr <= 64'(cp2af_sRxPort.c0.data);
@@ -407,20 +436,26 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 ring_buffer_rptr <= RB_PTR_WIDTH'(cp2af_sRxPort.c0.data);
                 `TRACE(2, ("%t: AFU: MMIO_RING_BUFFER_RPTR COMMAND BUFFER: data=0x%h  flush=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush))
             end
+            MMIO_RING_BUFFER_NUM_CMD_REMAINING : begin
+                // Not writable
+                ring_buffer_num_cmds_remaining <= MAX_RING_BUFFER_CMDS_WIDTH'(cp2af_sRxPort.c0.data);
+                `TRACE(2, ("%t: AFU: MMIO_RING_BUFFER_NUM_CMD_REMAINING: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
+
+            end
             MMIO_CMD_ARG0: begin
-                cmd_args[0] <= 64'(cp2af_sRxPort.c0.data);
+                mmio_cmd_args[0] <= 64'(cp2af_sRxPort.c0.data);
             `ifdef DBG_TRACE_AFU
                 `TRACE(2, ("%t: AFU: MMIO_CMD_ARG0: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
             `endif
             end
             MMIO_CMD_ARG1: begin
-                cmd_args[1] <= 64'(cp2af_sRxPort.c0.data);
+                mmio_cmd_args[1] <= 64'(cp2af_sRxPort.c0.data);
             `ifdef DBG_TRACE_AFU
                 `TRACE(2, ("%t: AFU: MMIO_CMD_ARG1: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
             `endif
             end
             MMIO_CMD_ARG2: begin
-                cmd_args[2] <= 64'(cp2af_sRxPort.c0.data);
+                mmio_cmd_args[2] <= 64'(cp2af_sRxPort.c0.data);
             `ifdef DBG_TRACE_AFU
                 `TRACE(2, ("%t: AFU: MMIO_CMD_ARG2: data=%0d\n", $time, 64'(cp2af_sRxPort.c0.data)))
             `endif
@@ -445,8 +480,10 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             endcase
         end
         else begin
-            // Update flush if no hdr response
-            flush_ctr <= '0; 
+            // Clear flush only when ring buffer is empty (all commands consumed)
+            if (ring_buffer_num_cmds_remaining == 0) begin
+                flush_ctr <= '0;
+            end
         end
     end
 
@@ -458,8 +495,18 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     reg  vx_reset = 1; // asserted at initialization
     wire vx_busy;
 
-    wire is_mmio_wr_cmd = cp2af_sRxPort.c0.mmioWrValid && (MMIO_CMD_TYPE == mmio_req_hdr.address);
-    wire [CMD_TYPE_WIDTH-1:0] cmd_type = is_mmio_wr_cmd ? CMD_TYPE_WIDTH'(cp2af_sRxPort.c0.data) : CMD_TYPE_WIDTH'(CMD_IDLE);
+    wire is_mmio_wr_cmd = cp2af_sRxPort.c0.mmioWrValid && (MMIO_CMD_TYPE == mmio_req_hdr.address); // Zuoning: the MMIO_CMD_TYPE reg is being written into, but it doesn't determine if it is a READ or WRITE
+     `UNUSED_VAR(is_mmio_wr_cmd);
+    // Zuoning: cmd_type now depends on popped command from kernel FIFO
+    // When FIFO is not empty and we can pop, use cmd_header from FIFO output
+    // Otherwise use MMIO command (legacy path) or IDLE
+   
+    wire [CMD_TYPE_WIDTH-1:0] fifo_cmd_type = CMD_TYPE_WIDTH'(cmd_header[CMD_TYPE_WIDTH-1:0]);
+    
+    wire use_fifo_cmd = non_empty_cmd_fifo & ring_buffer_empty_start_popping_kernel_fifo & flush & (state == STATE_IDLE);
+    wire [CMD_TYPE_WIDTH-1:0] cmd_type = use_fifo_cmd ? fifo_cmd_type : CMD_TYPE_WIDTH'(CMD_IDLE);
+    
+    wire ring_buffer_empty_start_popping_kernel_fifo = ring_buffer_num_cmds_remaining == 0;
 
     // Note: This module includes the COMMAND FSM from the original vortex AFU
     cmd_dispatch #(
@@ -516,6 +563,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire [CCI_DATA_WIDTH-1:0] cci_mem_rsp_data;
     wire [CCI_ADDR_WIDTH-1:0] cci_mem_rsp_tag;
     wire cci_mem_rsp_ready;
+
 
     // adjust VX mnemory interface to be compatible with CCI
 
@@ -743,28 +791,30 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // COMMAND BUFFER:
 
-    wire f_push = flush | ring_buffer_read_data_valid;
-    wire f_pop = '0;
-    wire empty_ker_fifo;
+    wire cmd_fifo_push = ring_buffer_read_data_valid;
+    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & flush & (state == STATE_IDLE);
+    // Zuoning: pop when IDLE because make sure prev command is done before popping next command
 
-    `UNUSED_VAR (f_pop);
-    `UNUSED_VAR (empty_ker_fifo);
+    wire cmd_fifo_empty;
 
-    wire [63:0] io_addr_packet_in = ring_buffer_read_data_valid ? ring_buffer_read_data : io_addr_packet;
-    wire [63:0] io_addr_packet_out;
+    // `UNUSED_VAR (cmd_fifo_pop);
+    `UNUSED_VAR (cmd_fifo_empty);
+
+    wire [CCI_DATA_WIDTH-1:0] io_addr_packet_in = ring_buffer_read_data_valid ? ring_buffer_read_data : io_addr_packet;
+    wire [CCI_DATA_WIDTH-1:0] io_addr_packet_out;
     `UNUSED_VAR (io_addr_packet_in);
-    `UNUSED_VAR (io_addr_packet_out);
+    // `UNUSED_VAR (io_addr_packet_out);
 
     VX_fifo_queue #(
-        .DATAW (64)
-    ) FIFO_Kernel (
+        .DATAW (CCI_DATA_WIDTH)
+    ) cmd_fifo (
         .clk      (clk),
         .reset    (reset),
-        .push     (f_push),
-        .pop      (f_pop),
+        .push     (cmd_fifo_push),
+        .pop      (cmd_fifo_pop),
         .data_in  (io_addr_packet_in),
         .data_out (io_addr_packet_out),
-        .empty    (empty_ker_fifo), 
+        .empty    (cmd_fifo_empty), 
 
         `UNUSED_PIN (full),
         `UNUSED_PIN (alm_empty),
@@ -772,13 +822,26 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         `UNUSED_PIN (size)
     );
 
-    wire non_empty_ker_fifo = !empty_ker_fifo;
+    // ZUONING
+    // assume this header format
+    //
+    //  | CMD_ARG2 | CMD_ARG1 | CMD_ARG0 |  CMD_HEADER |
+    //  |  8 Byte  |  8 Byte  |  8 Byte  |   4 Byte    |
+    assign cmd_header = io_addr_packet_out[CMD_HEADER_WIDTH-1:0];
+    assign fifo_cmd_args[2] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH+CMD_ARG2_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH];
+    assign fifo_cmd_args[1] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH];
+    assign fifo_cmd_args[0] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH-1:CMD_HEADER_WIDTH];
+    
+    wire non_empty_cmd_fifo = !cmd_fifo_empty;
+    
+    // Mux between MMIO and FIFO command arguments
+    assign cmd_args = use_fifo_cmd ? fifo_cmd_args : mmio_cmd_args;
     /************* FIFO (Kernel) Module: End here *****************/
 
     /************* Ring Buffer Read Logic: Start here *****************/
     // COMMAND BUFFER:
     // Detect when new commands are available in ring buffer
-    wire ring_buffer_has_data = (ring_buffer_wptr != ring_buffer_rptr);
+    wire ring_buffer_has_data = ring_buffer_num_cmds_remaining > 0 & flush;
     
     // Calculate host memory address for current ring buffer entry
     // Address = base_addr + (rptr * entry_size)
@@ -825,12 +888,24 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         end else begin
             // Clear data valid after one cycle
             ring_buffer_read_data_valid <= 0;
+
+            // ZUONING: DEBUG print kernel FIFO entry when not empty
+            if (non_empty_cmd_fifo && ring_buffer_empty_start_popping_kernel_fifo && state == STATE_IDLE) begin
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] - Kernel FIFO Non-Empty: entry=0x%0h . cmd_fifo_pop=%0h . flush=%0h . cmd_type=%0h \n", $time, io_addr_packet_out,  cmd_fifo_pop, flush, cmd_type))
+            end
             
             // Issue new read request when data available and not pending
             if (ring_buffer_has_data && !ring_buffer_read_pending && !ring_buffer_read_req_valid) begin
                 ring_buffer_read_req_valid <= 1;
             `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Req: rptr=%0d, wptr=%0d, cl_addr=0x%0h\n", $time, ring_buffer_rptr, ring_buffer_wptr, ring_buffer_cl_addr))
+                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Req: rptr=%0d, wptr=%0d, cl_addr=0x%0h, pending=%0b, c0TxAlmFull=%0b\n", $time, ring_buffer_rptr, ring_buffer_wptr, ring_buffer_cl_addr, ring_buffer_read_pending, cp2af_sRxPort.c0TxAlmFull))
+            `endif
+            end
+            
+            // Debug: Monitor signals every cycle when has_data
+            if (ring_buffer_has_data) begin
+            `ifdef DBG_TRACE_AFU
+                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Debug - req_valid=%0b, req_ready=%0b, pending=%0b, fire=%0b\n", $time, ring_buffer_read_req_valid, ring_buffer_read_req_ready, ring_buffer_read_pending, ring_buffer_read_fire))
             `endif
             end 
             
@@ -846,10 +921,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             // Handle response
             if (ring_buffer_rsp_fire) begin
                 ring_buffer_read_pending <= 0;
-                ring_buffer_read_data <= cp2af_sRxPort.c0.data[63:0];
+                ring_buffer_read_data <= cp2af_sRxPort.c0.data;
                 // advance rptr after consuming an entry
                 ring_buffer_rptr <= ring_buffer_rptr + RB_PTR_WIDTH'(1);
                 ring_buffer_read_data_valid <= 1;
+                // Decrement remaining command count
+                ring_buffer_num_cmds_remaining <= ring_buffer_num_cmds_remaining - 1;
             `ifdef DBG_TRACE_AFU
                 // `TRACE(2, ("%t: AFU: COMMAND BUFFER: Read Rsp: data=0x%h\n", $time, cp2af_sRxPort.c0.data))
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] - Received Address: addr=0x%0h, data=0x%h \n", $time, host_ring_buffer_base_addr + (64'(ring_buffer_rptr) << 6), cp2af_sRxPort.c0.data))
@@ -868,7 +945,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     
     // TODO_: Find all instance of switch_hardcode and replace with actual
     // switch controller
-    wire switch_hardcode = !empty_ker_fifo;
+    wire switch_hardcode = !cmd_fifo_empty;
     wire switch_out_is_command = 1'b1; // True if state of switch is now "command"
 
     // Note: Shouldn't need a "is_vortex" because if CCIP Write Ctr is managed
@@ -935,11 +1012,11 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         cci_rd_req_addr_packet <= t_ccip_clAddr'(io_addr_packet_out);
 
         // Check if valid to send request
-        cci_rd_req_valid_packet <= (switch_out_is_command) && (non_empty_ker_fifo) && ((queue_now + 1) < size_packet) && !cp2af_sRxPort.c0TxAlmFull;
+        cci_rd_req_valid_packet <= (switch_out_is_command) && (non_empty_cmd_fifo) && ((queue_now + 1) < size_packet) && !cp2af_sRxPort.c0TxAlmFull;
 
         `ifdef DBG_TRACE_AFU
-          if(non_empty_ker_fifo && (queue_now != size_packet)) begin
-            `TRACE(2, ("%t: AFU: Valid_Check (PACKET): flush=%0d, queue_now=%0d, size_packet=%0d, rd_req_valid=%0d, rd_req_fire=%d\n", $time, non_empty_ker_fifo,queue_now,size_packet, cci_rd_req_valid_packet, cci_rd_req_fire_packet))
+          if(non_empty_cmd_fifo && (queue_now != size_packet)) begin
+            `TRACE(2, ("%t: AFU: Valid_Check (PACKET): flush=%0d, queue_now=%0d, size_packet=%0d, rd_req_valid=%0d, rd_req_fire=%d\n", $time, non_empty_cmd_fifo,queue_now,size_packet, cci_rd_req_valid_packet, cci_rd_req_fire_packet))
           end
         `endif
  
@@ -1011,6 +1088,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     always @(*) begin
         
         // Priority: ring buffer > packet > normal reads
+        // Assert valid when a read request is issued; platform acceptance is indicated by !c0TxAlmFull
         if (ring_buffer_read_fire) begin
             af2cp_sTxPort.c0.valid       = 1;
             af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
