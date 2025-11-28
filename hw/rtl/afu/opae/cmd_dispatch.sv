@@ -139,6 +139,9 @@ module cmd_dispatch import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import V
             STATE_MEM_WRITE: begin
                 if (cmd_mem_wr_done) begin
                     state <= STATE_IDLE;
+                    `ifdef DBG_TRACE_AFU
+                        `TRACE(2, ("%t: AFU: STATE_MEM_WRITE Goto STATE IDLE\n", $time))
+                    `endif
                 end
             end
             

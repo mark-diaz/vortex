@@ -106,13 +106,19 @@ int main() {
   std::vector<TYPE> h_dst(num_points);
 
   for (uint32_t i = 0; i < num_points; ++i) {
-    h_src0[i] = Comparator<TYPE>::generate();
-    h_src1[i] = Comparator<TYPE>::generate();
+    h_src0[i] = 15;
+    h_src1[i] = 15;
   }
+  std::cout << "[COMMAND BUFFER SW] src0_buffer content:  "  << std::endl;
+  for (uint32_t i = 0; i < num_points; ++i) {
+    std::cout << h_src0[i] << " ";
+  }
+  std::cout << std::endl;
 
   // upload source buffer0
   std::cout << "upload source buffer0" << std::endl;
   RT_CHECK(vx_copy_to_dev(src0_buffer, h_src0.data(), 0, buf_size));
+
 
   // upload source buffer1
   // std::cout << "upload source buffer1" << std::endl;

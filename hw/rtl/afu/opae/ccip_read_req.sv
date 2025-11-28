@@ -158,6 +158,9 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
             cci_mem_wr_req_ctr <= '0;
             cci_mem_wr_req_addr_base <= cmd_mem_addr;
             cmd_mem_wr_done     <= 0;
+            `ifdef DBG_TRACE_AFU
+            `TRACE(2, ("%t: [COMMAND BUFFER HW]: ccip_read_req setting cci_rd_req_addr=0x%0h\n", $time, cmd_io_addr))
+        `endif
         end
 
         // Debug: Ready to fire 
@@ -187,10 +190,16 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
         end
 
         if (cci_mem_wr_req_fire) begin
+            //  `ifdef DBG_TRACE_AFU
+            //     `TRACE(2, ("%t: [ZUONING ]AFU: cci_mem_wr_req_fire=%0d\n", $time, cci_mem_wr_req_fire))
+            // `endif
             cci_mem_wr_req_ctr <= cci_mem_wr_req_ctr + CCI_ADDR_WIDTH'(1);
             if (cci_mem_wr_req_ctr == (cmd_data_size-1)) begin
                 cmd_mem_wr_done <= 1;
             end
+             `ifdef DBG_TRACE_AFU
+                `TRACE(2, ("%t: [ZUONING ]AFU: cci_mem_wr_req_fire=%0d . cci_mem_wr_req_ctr=%0d . cmd_data_size=%0d\n", $time, cci_mem_wr_req_fire, cci_mem_wr_req_ctr, cmd_data_size))
+            `endif
         end
     end
 

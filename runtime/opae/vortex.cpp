@@ -55,6 +55,7 @@ using namespace vortex;
 #define MMIO_HOST_RING_BUFFER_BASE_ADDR  (AFU_IMAGE_MMIO_HOST_RING_BUFFER_BASE_ADDR * 4)
 #define MMIO_RING_BUFFER_WPTR (AFU_IMAGE_MMIO_RING_BUFFER_WPTR * 4)
 #define MMIO_RING_BUFFER_RPTR (AFU_IMAGE_MMIO_RING_BUFFER_RPTR * 4)
+#define MMIO_RING_BUFFER_NUM_CMD_REMAINING (AFU_IMAGE_MMIO_RING_BUFFER_NUM_CMD_REMAINING * 4)
 
 #define MMIO_STATUS      (AFU_IMAGE_MMIO_STATUS * 4)
 #define MMIO_DEV_CAPS    (AFU_IMAGE_MMIO_DEV_CAPS * 4)
@@ -510,22 +511,23 @@ public:
     // COMMAND BUFFER: Debug statements
 
 
-    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG0 (hex): 0x%016lx\n", staging_ioaddr_);
-    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG1 (hex): 0x%016lx\n", dev_addr);
-    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG2 (hex): 0x%016lx\n", asize);
+
+    uint64_t arg0 = staging_ioaddr_ >> ls_shift;
+    uint64_t arg1 = dev_addr        >> ls_shift;
+    uint64_t arg2 = asize           >> ls_shift;
+    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG0 (hex): 0x%016lx\n", arg0);
+    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG1 (hex): 0x%016lx\n", arg1);
+    fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG2 (hex): 0x%016lx\n", arg2);
     fprintf(stdout, "[COMMAND BUFFER SW] ls_shift = %d\n", ls_shift);
-
-
-    // uint64_t arg0 = staging_ioaddr_ >> ls_shift;
-    // uint64_t arg1 = dev_addr        >> ls_shift;
-    // uint64_t arg2 = asize           >> ls_shift;
+    fprintf(stdout, "[COMMAND BUFFER SW] staging_ioaddr_ = %d\n", staging_ioaddr_);
     
-    uint64_t arg0 = staging_ioaddr_;
-    uint64_t arg1 = dev_addr;
-    uint64_t arg2 = asize;
+    // uint64_t arg0 = staging_ioaddr_;
+    // uint64_t arg1 = dev_addr;
+    // uint64_t arg2 = asize;
     // --- Build 24-byte payload ---
     uint8_t payload[24];
 
+    // memcpy(payload + 0,  &CMD_MEM_WRITE, 8);
     memcpy(payload + 0,  &arg0, 8);
     memcpy(payload + 8,  &arg1, 8);
     memcpy(payload + 16, &arg2, 8);
@@ -534,6 +536,9 @@ public:
     if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
       return -1;
 
+    // if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
+    //   return -1;
+
     // --- Update write pointer for hardware ---
     // size_t wptr = cmd_buffer_.used_space();
 
@@ -541,7 +546,13 @@ public:
     //     return -1;
     // });
 
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 2), { return -1; });
+
+    fprintf(stdout, "[COMMAND BUFFER SW] Upload command enqueued\n");
     flush_commands();
+    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+      return -1;
+
 
     return 0;
   }
@@ -773,12 +784,16 @@ private:
     // TODO: change from 1 to wptr
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
 
+    // MMIO_RING_BUFFER_NUM_CMD_REMAINING
+    // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 1), { return -1; });
+
     return true;
   }
 
 
   int flush_commands() {
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, 1), { return -1; });
+    fprintf(stdout, "[COMMAND BUFFER SW] Finish writing to MMIO_FLUSH \n");
     return 0;
   }
 
@@ -801,6 +816,8 @@ private:
       api_.fpgaReleaseBuffer(fpga_, staging_wsid_);
       return -1;
     });
+    
+    // fprintf(stdout, "[COMMAND BUFFER SW] ensure_staging: staging_ioaddr_ = 0x%lx\n", staging_ioaddr_);
 
     staging_size_ = size;
 
