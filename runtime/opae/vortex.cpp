@@ -536,8 +536,8 @@ public:
     if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
       return -1;
 
-    // if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
-    //   return -1;
+    if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
+      return -1;
 
     // --- Update write pointer for hardware ---
     // size_t wptr = cmd_buffer_.used_space();

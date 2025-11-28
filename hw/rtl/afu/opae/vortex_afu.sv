@@ -922,7 +922,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             end
             
             // Issue new read request when data available and not pending
-            if (ring_buffer_has_data && !ring_buffer_read_pending && !ring_buffer_read_req_valid ) begin
+            if (ring_buffer_has_data && !ring_buffer_read_pending && !ring_buffer_read_req_valid && flush) begin
                 ring_buffer_read_req_valid <= 1;
             `ifdef DBG_TRACE_AFU
                 `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Req: rptr=%0d, wptr=%0d, cl_addr=0x%0h, pending=%0b, c0TxAlmFull=%0b\n", $time, ring_buffer_rptr, ring_buffer_wptr, ring_buffer_cl_addr, ring_buffer_read_pending, cp2af_sRxPort.c0TxAlmFull))
@@ -1180,6 +1180,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
  
     wire cci_rd_rsp_fire = cp2af_sRxPort.c0.rspValid
                         && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE)
+                        && (cp2af_sRxPort.c0.hdr.mdata[15:8] != RB_MDATA_TAG)
                         && (!switch_hardcode);
 
     assign cci_rd_req_tag = CCI_RD_QUEUE_TAGW'(cci_rd_req_ctr);
