@@ -86,6 +86,14 @@ using namespace vortex;
 
 // COMMAND BUFFER:
 
+// Per-command staging buffer record
+struct StagingBuffer {
+  uint64_t wsid;
+  uint64_t ioaddr;
+  uint8_t* ptr;
+  uint64_t size;
+};
+
 // note: vortex.h: CACHE_BLOCK_SIZE = 64
 class CommandBuffer {
 public:
@@ -172,10 +180,6 @@ public:
                   GLOBAL_MEM_SIZE - ALLOC_BASE_ADDR,
                   RAM_PAGE_SIZE,
                   CACHE_BLOCK_SIZE)
-    , staging_wsid_(0)
-    , staging_ioaddr_(0)
-    , staging_ptr_(nullptr)
-    , staging_size_(0)
     // COMMAND BUFFER: initial testing
     , cmd_buffer_wsid_(0)
     , cmd_buffer_ptr_(nullptr)
@@ -188,10 +192,11 @@ public:
     vx_scope_stop(this);
   #endif
     if (fpga_ != nullptr) {
-      if (staging_size_ != 0) {
-        api_.fpgaReleaseBuffer(fpga_, staging_wsid_);
-        staging_size_ = 0;
+      // Release all per-command staging buffers
+      for (auto& sb : staging_buffers_) {
+        api_.fpgaReleaseBuffer(fpga_, sb.wsid);
       }
+      staging_buffers_.clear();
       // Deallocate Pinned Command Buffer
       if (cmd_buffer_wsid_ != 0) {
         api_.fpgaReleaseBuffer(fpga_, cmd_buffer_wsid_);
@@ -382,16 +387,17 @@ public:
     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
       return -1;
 
-    if (this->ensure_staging(asize) != 0)
+    // Allocate fresh staging buffer for this command
+    StagingBuffer sb;
+    if (this->allocate_staging_for_command(asize, &sb) != 0)
       return -1;
 
-
-    // Wrapping Test
-    memcpy(staging_ptr_, host_ptr, size);
+    // Copy host data to new staging buffer
+    memcpy(sb.ptr, host_ptr, size);
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, staging_ioaddr_ >> ls_shift), {
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, sb.ioaddr >> ls_shift), {
       return -1;
     });
 
@@ -500,11 +506,13 @@ public:
     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
       return -1;
 
-    if (this->ensure_staging(asize) != 0)
+    // Allocate fresh staging buffer for this command
+    StagingBuffer sb;
+    if (this->allocate_staging_for_command(asize, &sb) != 0)
       return -1;
 
-    // update staging buffer
-    memcpy(staging_ptr_, host_ptr, size);
+    // Copy host data to new staging buffer
+    memcpy(sb.ptr, host_ptr, size);
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
@@ -512,14 +520,14 @@ public:
 
 
 
-    uint64_t arg0 = staging_ioaddr_ >> ls_shift;
+    uint64_t arg0 = sb.ioaddr >> ls_shift;
     uint64_t arg1 = dev_addr        >> ls_shift;
     uint64_t arg2 = asize           >> ls_shift;
     fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG0 (hex): 0x%016lx\n", arg0);
     fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG1 (hex): 0x%016lx\n", arg1);
     fprintf(stdout, "[COMMAND BUFFER SW]  CMD_ARG2 (hex): 0x%016lx\n", arg2);
     fprintf(stdout, "[COMMAND BUFFER SW] ls_shift = %d\n", ls_shift);
-    fprintf(stdout, "[COMMAND BUFFER SW] staging_ioaddr_ = %d\n", staging_ioaddr_);
+    fprintf(stdout, "[COMMAND BUFFER SW] staging_ioaddr = 0x%lx\n", sb.ioaddr);
     
     // uint64_t arg0 = staging_ioaddr_;
     // uint64_t arg1 = dev_addr;
@@ -536,8 +544,8 @@ public:
     if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
       return -1;
 
-    if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
-      return -1;
+    // if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
+    //   return -1;
 
     // --- Update write pointer for hardware ---
     // size_t wptr = cmd_buffer_.used_space();
@@ -546,12 +554,12 @@ public:
     //     return -1;
     // });
 
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 2), { return -1; });
+    // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 1), { return -1; });
 
-    fprintf(stdout, "[COMMAND BUFFER SW] Upload command enqueued\n");
-    flush_commands();
-    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
-      return -1;
+    // fprintf(stdout, "[COMMAND BUFFER SW] Upload command enqueued\n");
+    // flush_commands();
+    // if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+    //   return -1;
 
 
     return 0;
@@ -626,12 +634,14 @@ public:
     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
       return -1;
 
-    if (this->ensure_staging(asize) != 0)
+    // Allocate fresh staging buffer for this command
+    StagingBuffer sb;
+    if (this->allocate_staging_for_command(asize, &sb) != 0)
       return -1;
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG0, staging_ioaddr_ >> ls_shift), {
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG0, sb.ioaddr >> ls_shift), {
       return -1;
     });
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG1, dev_addr >> ls_shift), {
@@ -649,7 +659,7 @@ public:
       return -1;
 
     // read staging buffer
-    memcpy(host_ptr, staging_ptr_, size);
+    memcpy(host_ptr, sb.ptr, size);
 
     return 0;
   }
@@ -771,6 +781,15 @@ public:
     return 0;
   }
 
+  int flush_commands() {
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 1), { return -1; });
+
+    
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, 1), { return -1; });
+    fprintf(stdout, "[COMMAND BUFFER SW] Finish writing to MMIO_FLUSH \n");
+    return 0;
+  }
+
 private:
 
   // Command Buffer:
@@ -791,35 +810,28 @@ private:
   }
 
 
-  int flush_commands() {
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, 1), { return -1; });
-    fprintf(stdout, "[COMMAND BUFFER SW] Finish writing to MMIO_FLUSH \n");
-    return 0;
-  }
+  
 
-  int ensure_staging(uint64_t size) {
-    if (staging_size_ >= size)
-      return 0;
-
-    if (staging_size_ != 0) {
-      api_.fpgaReleaseBuffer(fpga_, staging_wsid_);
-      staging_size_ = 0;
-    }
-
-    // allocate new buffer
-    CHECK_FPGA_ERR(api_.fpgaPrepareBuffer(fpga_, size, (void **)&staging_ptr_, &staging_wsid_, 0), {
+  int allocate_staging_for_command(uint64_t size, StagingBuffer* sb_out) {
+    StagingBuffer sb;
+    sb.size = size;
+    
+    // Allocate new buffer for this command
+    CHECK_FPGA_ERR(api_.fpgaPrepareBuffer(fpga_, size, (void **)&sb.ptr, &sb.wsid, 0), {
       return -1;
     });
 
-    // get the physical address of the buffer in the accelerator
-    CHECK_FPGA_ERR(api_.fpgaGetIOAddress(fpga_, staging_wsid_, &staging_ioaddr_), {
-      api_.fpgaReleaseBuffer(fpga_, staging_wsid_);
+    // Get the physical address of the buffer in the accelerator
+    CHECK_FPGA_ERR(api_.fpgaGetIOAddress(fpga_, sb.wsid, &sb.ioaddr), {
+      api_.fpgaReleaseBuffer(fpga_, sb.wsid);
       return -1;
     });
     
-    // fprintf(stdout, "[COMMAND BUFFER SW] ensure_staging: staging_ioaddr_ = 0x%lx\n", staging_ioaddr_);
+    fprintf(stdout, "[COMMAND BUFFER SW] allocate_staging_for_command: new staging @ ioaddr=0x%lx\n", sb.ioaddr);
 
-    staging_size_ = size;
+    // Track for cleanup
+    staging_buffers_.push_back(sb);
+    *sb_out = sb;
 
     return 0;
   }
@@ -831,10 +843,7 @@ private:
   uint64_t dev_caps_;
   uint64_t isa_caps_;
   uint64_t global_mem_size_;
-  uint64_t staging_wsid_;
-  uint64_t staging_ioaddr_;
-  uint8_t *staging_ptr_;
-  uint64_t staging_size_;
+  std::vector<StagingBuffer> staging_buffers_;
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
 
   // COMMAND BUFFER:

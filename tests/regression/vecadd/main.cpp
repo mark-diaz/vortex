@@ -107,7 +107,7 @@ int main() {
 
   for (uint32_t i = 0; i < num_points; ++i) {
     h_src0[i] = 15;
-    h_src1[i] = 15;
+    h_src1[i] = 11;
   }
   std::cout << "[COMMAND BUFFER SW] src0_buffer content:  "  << std::endl;
   for (uint32_t i = 0; i < num_points; ++i) {
@@ -118,8 +118,12 @@ int main() {
   // upload source buffer0
   std::cout << "upload source buffer0" << std::endl;
   RT_CHECK(vx_copy_to_dev(src0_buffer, h_src0.data(), 0, buf_size));
+  RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
 
-
+  
+  vx_flush_commands(src0_buffer);
+  if (vx_ready_wait(device, VX_MAX_TIMEOUT) != 0)
+    return -1;
   // upload source buffer1
   // std::cout << "upload source buffer1" << std::endl;
   // RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));

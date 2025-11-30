@@ -105,6 +105,8 @@ int vx_mem_info(vx_device_h hdevice, uint64_t* mem_free, uint64_t* mem_used);
 // Copy bytes from host to device memory
 int vx_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size);
 
+int vx_flush_commands(vx_buffer_h hbuffer);
+
 // Copy bytes from device memory to host
 int vx_copy_from_dev(void* host_ptr, vx_buffer_h hbuffer, uint64_t src_offset, uint64_t size);
 

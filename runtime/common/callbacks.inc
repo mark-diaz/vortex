@@ -44,6 +44,12 @@ extern int vx_dev_init(callbacks_t* callbacks) {
     return device->flush(buffer->addr + dst_offset, host_ptr, size);
   };
 
+  callbacks->flush_commands = [](vx_buffer_h hbuffer) {
+    auto buffer = ((vx_buffer*)hbuffer);
+    auto device = ((vx_device*)buffer->device);
+    return device->flush_commands();
+  };
+
   callbacks->dev_open = [](vx_device_h* hdevice)->int {
     if (nullptr == hdevice)
       return  -1;

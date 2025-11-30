@@ -24,6 +24,110 @@
 `include "ccip_read_req.sv"
 `include "ccip_write_req.sv"
 
+// Enable multi-command unpacker by default (can be overridden by toolchain)
+`ifndef CMD_UNPACK_MULTI
+`define CMD_UNPACK_MULTI 1
+`endif
+
+// Optional: multi-command unpacker declarations must be at compilation unit scope
+`ifdef CMD_UNPACK_MULTI
+package cmd_pkg;
+    // Header is 4 bytes; keep enum 32-bit to match packet header width
+    typedef enum logic [31:0] {
+        CMD_MEM_READ_e  = `AFU_IMAGE_CMD_MEM_READ,
+        CMD_MEM_WRITE_e = `AFU_IMAGE_CMD_MEM_WRITE,
+        CMD_RUN_e       = `AFU_IMAGE_CMD_RUN,
+        CMD_DCR_WRITE_e = `AFU_IMAGE_CMD_DCR_WRITE
+    } cmd_opcode_e;
+
+    typedef struct packed {
+        cmd_opcode_e opcode;
+        logic [63:0] arg0;
+        logic [63:0] arg1;
+        logic [63:0] arg2;
+    } cmd_t;
+
+    function automatic int unsigned cmd_size_bytes(cmd_opcode_e op);
+        case (op)
+            CMD_MEM_READ_e, CMD_MEM_WRITE_e: return 4 + 8 + 8 + 8; // 28 bytes
+            CMD_RUN_e:                        return 4 + 8 + 8;     // 20 bytes
+            CMD_DCR_WRITE_e:                  return 4 + 8;         // 12 bytes
+            default:                          return 0;
+        endcase
+    endfunction
+endpackage
+
+module cacheline_cmd_unpacker #(
+    parameter int CL_BYTES = 64,
+    parameter int MAX_CMDS = 5
+)(
+    input  logic [CL_BYTES*8-1:0] cl_data,
+    output logic [$clog2(MAX_CMDS+1)-1:0] cmd_count,
+    output cmd_pkg::cmd_t cmds [MAX_CMDS]
+);
+    import cmd_pkg::*;
+
+    function automatic logic [31:0] get_u32(input logic [CL_BYTES*8-1:0] d, input int unsigned byte_off);
+        get_u32 = d[(byte_off+4)*8-1 -: 32];
+    endfunction
+    function automatic logic [63:0] get_u64(input logic [CL_BYTES*8-1:0] d, input int unsigned byte_off);
+        get_u64 = d[(byte_off+8)*8-1 -: 64];
+    endfunction
+
+    // Use int for arithmetic to avoid width expansion/truncation warnings
+    int unsigned offset;
+    cmd_opcode_e opcode;
+    int unsigned size_b;
+    int unsigned count;
+
+    always_comb begin
+        count  = 0;
+        offset = 0;
+        for (int i = 0; i < MAX_CMDS; ++i) begin
+            cmds[i] = '{opcode: cmd_opcode_e'(0), arg0: '0, arg1: '0, arg2: '0};
+        end
+
+        // Parse commands packed sequentially in the 64B cache line
+        while ((offset + 4) <= CL_BYTES && count < MAX_CMDS) begin
+            opcode = cmd_opcode_e'(get_u32(cl_data, offset));
+            size_b = cmd_size_bytes(opcode);
+            if (size_b == 0) break;
+            if ((offset + size_b) > CL_BYTES) break;
+
+            unique case (opcode)
+                CMD_MEM_WRITE_e, CMD_MEM_READ_e: begin
+                    // Layout: header(4) + arg2(8) + arg1(8) + arg0(8)
+                    cmds[count].opcode = opcode;
+                    cmds[count].arg0   = get_u64(cl_data, offset + 4 + 0);
+                    cmds[count].arg1   = get_u64(cl_data, offset + 4 + 8);
+                    cmds[count].arg2   = get_u64(cl_data, offset + 4 + 16);
+                end
+                CMD_RUN_e: begin
+                    cmds[count].opcode = opcode;
+                    cmds[count].arg0   = get_u64(cl_data, offset + 4 + 0);
+                    cmds[count].arg1   = get_u64(cl_data, offset + 4 + 8);
+                    cmds[count].arg2   = '0;
+                end
+                CMD_DCR_WRITE_e: begin
+                    cmds[count].opcode = opcode;
+                    cmds[count].arg0   = get_u64(cl_data, offset + 4 + 0);
+                    cmds[count].arg1   = '0;
+                    cmds[count].arg2   = '0;
+                end
+                default: begin
+                    break;
+                end
+            endcase
+
+            count  = count + 1;
+            offset = offset + size_b;
+        end
+
+        cmd_count = count[$clog2(MAX_CMDS+1)-1:0];
+    end
+endmodule
+`endif // CMD_UNPACK_MULTI
+
 module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_gpu_pkg::*; #(
     parameter NUM_LOCAL_MEM_BANKS = 2
 ) (
@@ -140,7 +244,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // ZUONING 
     reg [STATE_WIDTH-1:0] state;
-    reg [MAX_RING_BUFFER_CMDS_WIDTH-1:0] ring_buffer_num_cmds_remaining;
+    reg [MAX_RING_BUFFER_CMDS_WIDTH-1:0] ring_buffer_num_cmds_remaining, ring_buffer_num_cmds_consumed;
+
     /* verilator lint_off UNUSEDSIGNAL */
     wire [CMD_HEADER_WIDTH-1:0] cmd_header;
     /* verilator lint_on UNUSEDSIGNAL */
@@ -423,6 +528,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             ring_buffer_rptr <= '0;
             host_ring_buffer_base_addr <= '0;
             ring_buffer_num_cmds_remaining <= 0;
+            ring_buffer_num_cmds_consumed <= 0;
 
         end else if (cp2af_sRxPort.c0.mmioWrValid) begin
 
@@ -514,12 +620,14 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // When FIFO is not empty and we can pop, use cmd_header from FIFO output
     // Otherwise use MMIO command (legacy path) or IDLE
    
+    // wire use_fifo_cmd = non_empty_cmd_fifo & ring_buffer_empty_start_popping_kernel_fifo & flush & (state == STATE_IDLE);
+    // `UNUSED_VAR(use_fifo_cmd);
     wire [CMD_TYPE_WIDTH-1:0] fifo_cmd_type = CMD_TYPE_WIDTH'(cmd_header[CMD_TYPE_WIDTH-1:0]);
     
     wire use_fifo_cmd = non_empty_cmd_fifo & 
     ring_buffer_empty_start_popping_kernel_fifo & flush & (state == STATE_IDLE);
     `UNUSED_VAR(use_fifo_cmd);
-    wire [CMD_TYPE_WIDTH-1:0] cmd_type = cmd_fifo_pop ? fifo_cmd_type : CMD_TYPE_WIDTH'(CMD_IDLE);
+    wire [CMD_TYPE_WIDTH-1:0] cmd_type = use_unpacked ? fifo_cmd_type : CMD_TYPE_WIDTH'(CMD_IDLE);
     
     wire ring_buffer_empty_start_popping_kernel_fifo = ring_buffer_num_cmds_remaining == 0;
 
@@ -809,7 +917,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     reg[1:0] pop_cntr;
     wire cmd_fifo_push = ring_buffer_read_data_valid;
-    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b01);
+    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10);
 
     // Zuoning: pop when IDLE because make sure prev command is done before popping next command
     // after a pop, there is a two cycle delay for the state to change for this pop. so we want to wait two cycles after a pop to make sure the state is in IDLE again before popping next command
@@ -821,9 +929,29 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire [CCI_DATA_WIDTH-1:0] io_addr_packet_in = ring_buffer_read_data_valid ? ring_buffer_read_data : io_addr_packet;
     /* verilator lint_off UNUSEDSIGNAL */
     wire [CCI_DATA_WIDTH-1:0] io_addr_packet_out;
+    reg  [CCI_DATA_WIDTH-1:0] io_addr_packet_out_reg;
     /* verilator lint_on UNUSEDSIGNAL */
     // `UNUSED_VAR (io_addr_packet_in);
     // `UNUSED_VAR (io_addr_packet_out);
+
+// Multi-command unpacker instantiation (definitions are at top-level)
+`ifdef CMD_UNPACK_MULTI
+        import cmd_pkg::*;
+        localparam int MAX_CMDS = 5;
+        logic [$clog2(MAX_CMDS+1)-1:0] unpack_cmd_count, num_cmds_finished_from_cl;
+        // Tracks whether current cache line's unpacked commands are being consumed
+        reg line_active;
+        cmd_pkg::cmd_t                 unpack_cmds [MAX_CMDS];
+
+        cacheline_cmd_unpacker #(
+            .CL_BYTES(64),
+            .MAX_CMDS(MAX_CMDS)
+        ) u_cacheline_cmd_unpacker (
+            .cl_data(io_addr_packet_out_reg[64*8-1:0]),
+            .cmd_count(unpack_cmd_count),
+            .cmds(unpack_cmds)
+        );
+`endif
 
     VX_fifo_queue #(
         .DATAW (CCI_DATA_WIDTH)
@@ -847,15 +975,30 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     //
     //  | CMD_ARG2 | CMD_ARG1 | CMD_ARG0 |  CMD_HEADER |
     //  |  8 Byte  |  8 Byte  |  8 Byte  |   4 Byte    |
+`ifdef CMD_UNPACK_MULTI
+    // When multi-command unpacking is enabled, drive FIFO outputs
+    // from the current parsed command in the cache line.
+    // Note: advance index elsewhere when a command completes.
+    // Unified command completion pulse (extend later for RUN/DCR etc.)
+    wire cmd_done = is_kernel_finished; // TODO: include RUN/DCR completion pulses
+    // Drive unpack consumption whenever line_active and index < count
+    wire use_unpacked = line_active && (unpack_cmd_count != 0) && (num_cmds_finished_from_cl < unpack_cmd_count);
+    assign cmd_header       = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].opcode[CMD_HEADER_WIDTH-1:0] : {CMD_HEADER_WIDTH{1'b0}};
+    assign fifo_cmd_args[0] = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].arg0 : 64'b0;
+    assign fifo_cmd_args[1] = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].arg1 : 64'b0;
+    assign fifo_cmd_args[2] = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].arg2 : 64'b0;
+`else
+    // Legacy single-command-per-line slicing from kernel FIFO output
     assign cmd_header = cmd_fifo_pop ? io_addr_packet_out[CMD_HEADER_WIDTH-1:0] : {CMD_HEADER_WIDTH{1'b0}};
     assign fifo_cmd_args[2] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH+CMD_ARG2_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH];
     assign fifo_cmd_args[1] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH];
     assign fifo_cmd_args[0] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH-1:CMD_HEADER_WIDTH];
+`endif
     
     wire non_empty_cmd_fifo = !cmd_fifo_empty;
     
     // Mux between MMIO and FIFO command arguments
-    assign cmd_args = cmd_fifo_pop ? fifo_cmd_args : mmio_cmd_args;
+    assign cmd_args = use_unpacked ? fifo_cmd_args : mmio_cmd_args;
     /************* FIFO (Kernel) Module: End here *****************/
 
     /************* Ring Buffer Read Logic: Start here *****************/
@@ -864,10 +1007,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire ring_buffer_has_data = ring_buffer_num_cmds_remaining > 0 ;
     
     // Calculate host memory address for current ring buffer entry
-    // Address = base_addr + (rptr * entry_size)
+    // Address = base_addr + (index * entry_size), where index = ring_buffer_num_cmds_consumed
     // Since CCI-P uses cache-line addresses (64-byte aligned), we need to convert:
     // Cache-line address = byte_address >> 6
-    wire [63:0] ring_buffer_byte_addr = host_ring_buffer_base_addr + (64'(ring_buffer_rptr) * 64'd64);
+    wire [63:0] ring_buffer_byte_addr = host_ring_buffer_base_addr + (64'(ring_buffer_num_cmds_consumed) * 64'd64);
+    // ZUONING: TODO: figure out wrap-around if ring buffer size is limited
+
     wire [CCI_ADDR_WIDTH-1:0] ring_buffer_cl_addr = CCI_ADDR_WIDTH'(ring_buffer_byte_addr >> 6);
     
     // Issue read request when there's data and we're ready
@@ -900,12 +1045,18 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     `UNUSED_VAR (cmd_arg1);
     `UNUSED_VAR (cmd_arg2);
 
+    // Simple completion pulse for unpack index advance (placeholder).
+    // You can refine this to include RUN/DCR completion as needed.
+    // wire is_kernel_finished = cmd_mem_wr_done | cmd_mem_rd_done;
+    wire is_kernel_finished = state == STATE_IDLE && state != state_prev;
+
     always @(posedge clk) begin
         if (reset) begin
             ring_buffer_read_req_valid <= 0;
             ring_buffer_read_pending <= 0;
             ring_buffer_read_data_valid <= 0;
             cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
+            line_active <= 1'b0;
             cmd_arg0_reg <= 64'h0;
             cmd_arg1_reg <= 64'h0;
             cmd_arg2_reg <= 64'h0;
@@ -914,12 +1065,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             // Clear data valid after one cycle
             ring_buffer_read_data_valid <= 0;
 
-            // `TRACE(2, ("%t: ZUONING: [COMMAND BUFFER HW] - cmd_args[2]=%d\n", $time,  cmd_args[2]))
-
-            // ZUONING: DEBUG print kernel FIFO entry when not empty
-            if (non_empty_cmd_fifo && ring_buffer_empty_start_popping_kernel_fifo && state == STATE_IDLE) begin
-                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] - Kernel FIFO Non-Empty: entry=0x%0h . cmd_fifo_pop=%0h . flush=%0h . cmd_type=%0h . cmd_args[2]=%d\n", $time, io_addr_packet_out,  cmd_fifo_pop, flush, cmd_type, cmd_args[2]))
-            end
             
             // Issue new read request when data available and not pending
             if (ring_buffer_has_data && !ring_buffer_read_pending && !ring_buffer_read_req_valid && flush) begin
@@ -930,11 +1075,11 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             end
             
             // Debug: Monitor signals every cycle when has_data
-            if (ring_buffer_has_data) begin
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Debug - req_valid=%0b, req_ready=%0b, pending=%0b, fire=%0b\n", $time, ring_buffer_read_req_valid, ring_buffer_read_req_ready, ring_buffer_read_pending, ring_buffer_read_fire))
-            `endif
-            end 
+            // if (ring_buffer_has_data) begin
+            // `ifdef DBG_TRACE_AFU
+            //     `TRACE(2, ("%t: AFU: COMMAND BUFFER: Debug - req_valid=%0b, req_ready=%0b, pending=%0b, fire=%0b\n", $time, ring_buffer_read_req_valid, ring_buffer_read_req_ready, ring_buffer_read_pending, ring_buffer_read_fire))
+            // `endif
+            // end 
             
             // Clear request and mark pending when accepted
             if (ring_buffer_read_fire) begin
@@ -947,31 +1092,62 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
             // ZUONING: DEBUG
             if (cmd_fifo_pop) begin
-
-                cmd_arg0_reg <= cmd_args[0];
-                cmd_arg1_reg <= cmd_args[1];
-                cmd_arg2_reg <= cmd_args[2];
-                cmd_type_reg <= cmd_type;
+                io_addr_packet_out_reg <= io_addr_packet_out;
+                // cmd_arg0_reg <= cmd_args[0];
+                // cmd_arg1_reg <= cmd_args[1];
+                // cmd_arg2_reg <= cmd_args[2];
+                // cmd_type_reg <= cmd_type;
                 pop_cntr <= 2'b0;
+                num_cmds_finished_from_cl <= 0; // start at first unpacked command
+                line_active <= 1'b1;            // enable unpack consumption
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
             end
             else begin
-                cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
+                // cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
                 pop_cntr <= pop_cntr + 2'b1;
+            end
+
+            if (use_unpacked) begin
+                cmd_arg0_reg <= cmd_args[0];
+                cmd_arg1_reg <= cmd_args[1];
+                cmd_arg2_reg <= cmd_args[2];
+                cmd_type_reg <= cmd_type;
+
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
+                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
+            end
+            else begin
+                cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
+            end
+
+            // Advance to next command within cache line on completion
+            if (cmd_done && line_active && use_unpacked) begin
+                if (num_cmds_finished_from_cl + 1 == unpack_cmd_count) begin
+                    // Finished last command of this cache line
+                    line_active <= 1'b0;
+                    num_cmds_finished_from_cl <= 0; // prepare for next line
+                end else begin
+                    num_cmds_finished_from_cl <= num_cmds_finished_from_cl + 1;
+                end
             end
             
             // Handle response
             if (ring_buffer_rsp_fire) begin
                 ring_buffer_read_pending <= 0;
                 ring_buffer_read_data <= cp2af_sRxPort.c0.data;
+                num_cmds_finished_from_cl <= 0; // reset index for new line
+                line_active <= 1'b1;            // activate new line
                 // advance rptr after consuming an entry
                 // ring_buffer_rptr <= ring_buffer_rptr + RB_PTR_WIDTH'(1);
                 ring_buffer_read_data_valid <= 1;
                 // Decrement remaining command count
                 ring_buffer_num_cmds_remaining <= ring_buffer_num_cmds_remaining - 1;
+                ring_buffer_num_cmds_consumed <= ring_buffer_num_cmds_consumed + 1;
             `ifdef DBG_TRACE_AFU
                 // `TRACE(2, ("%t: AFU: COMMAND BUFFER: Read Rsp: data=0x%h\n", $time, cp2af_sRxPort.c0.data))
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] - Received Address: addr=0x%0h, data=0x%h \n", $time, host_ring_buffer_base_addr + (64'(ring_buffer_rptr) << 6), cp2af_sRxPort.c0.data))
@@ -1477,13 +1653,27 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         );
     end
 
+
+    reg [STATE_WIDTH-1:0] state_prev;
+    always @(posedge clk) begin
+        if (reset)
+            state_prev <= STATE_IDLE;
+        else begin
+            state_prev <= state;
+        end
+    end
+
     // SCOPE //////////////////////////////////////////////////////////////////
 
 `ifdef DBG_SCOPE_AFU
-    reg [STATE_WIDTH-1:0] state_prev;
-    always @(posedge clk) begin
-        state_prev <= state;
-    end
+    // reg [STATE_WIDTH-1:0] state_prev;
+    // always @(posedge clk) begin
+    //     if (reset)
+    //         state_prev <= STATE_IDLE;
+    //     else begin
+    //         state_prev <= state;
+    //     end
+    // end
     wire state_changed   = (state != state_prev);
     wire vx_mem_req_fire = vx_mem_req_valid[0] && vx_mem_req_ready[0];
     wire vx_mem_rsp_fire = vx_mem_rsp_valid[0] && vx_mem_rsp_ready[0];
