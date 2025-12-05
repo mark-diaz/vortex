@@ -143,8 +143,9 @@ extern int vx_mem_info(vx_device_h hdevice, uint64_t* mem_free, uint64_t* mem_us
 extern int vx_copy_to_dev(vx_buffer_h hbuffer, const void* host_ptr, uint64_t dst_offset, uint64_t size) {
   return (g_callbacks.copy_to_dev)(hbuffer, host_ptr, dst_offset, size);
 }
-extern int vx_flush_commands(vx_buffer_h hbuffer) {
-  return (g_callbacks.flush_commands)(hbuffer);
+
+extern int vx_flush_commands(vx_device_h hdevice) {
+  return (g_callbacks.flush_commands)(hdevice);
 }
 
 extern int vx_copy_from_dev(void* host_ptr, vx_buffer_h hbuffer, uint64_t src_offset, uint64_t size) {

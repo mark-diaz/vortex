@@ -59,7 +59,7 @@ typedef struct {
   // Copy bytes from device memory to host
   int (*copy_from_dev) (void* host_ptr, vx_buffer_h hbuffer, uint64_t src_offset, uint64_t size);
 
-  int (*flush_commands) (vx_buffer_h hbuffer);
+  int (*flush_commands) (vx_device_h hdevice);
 
   // Start device execution
   int (*start) (vx_device_h hdevice, vx_buffer_h hkernel, vx_buffer_h harguments);

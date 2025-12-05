@@ -50,8 +50,8 @@ package cmd_pkg;
     function automatic int unsigned cmd_size_bytes(cmd_opcode_e op);
         case (op)
             CMD_MEM_READ_e, CMD_MEM_WRITE_e: return 4 + 8 + 8 + 8; // 28 bytes
-            CMD_RUN_e:                        return 4 + 8 + 8;     // 20 bytes
-            CMD_DCR_WRITE_e:                  return 4 + 8;         // 12 bytes
+            CMD_DCR_WRITE_e:                        return 4 + 8 + 8;     // 20 bytes
+            CMD_RUN_e:                  return 4 + 8;         // 12 bytes
             default:                          return 0;
         endcase
     endfunction
@@ -102,13 +102,13 @@ module cacheline_cmd_unpacker #(
                     cmds[count].arg1   = get_u64(cl_data, offset + 4 + 8);
                     cmds[count].arg2   = get_u64(cl_data, offset + 4 + 16);
                 end
-                CMD_RUN_e: begin
+                CMD_DCR_WRITE_e: begin
                     cmds[count].opcode = opcode;
                     cmds[count].arg0   = get_u64(cl_data, offset + 4 + 0);
                     cmds[count].arg1   = get_u64(cl_data, offset + 4 + 8);
                     cmds[count].arg2   = '0;
                 end
-                CMD_DCR_WRITE_e: begin
+                CMD_RUN_e: begin
                     cmds[count].opcode = opcode;
                     cmds[count].arg0   = get_u64(cl_data, offset + 4 + 0);
                     cmds[count].arg1   = '0;
@@ -288,6 +288,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     t_ccip_clAddr cmd_io_addr;
     assign cmd_io_addr = t_ccip_clAddr'(cmd_arg0_reg);
 
+
     // wire [CCI_ADDR_WIDTH-1:0] cmd_mem_addr  = CCI_ADDR_WIDTH'(cmd_args[1]);
     // wire [CCI_ADDR_WIDTH-1:0] cmd_data_size = CCI_ADDR_WIDTH'(cmd_args[2]);
 
@@ -295,6 +296,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // wire [VX_DCR_DATA_WIDTH-1:0] cmd_dcr_data = VX_DCR_DATA_WIDTH'(cmd_args[1]);
 
     wire [CCI_ADDR_WIDTH-1:0] cmd_mem_addr  = CCI_ADDR_WIDTH'(cmd_arg1_reg);
+     
     wire [CCI_ADDR_WIDTH-1:0] cmd_data_size = CCI_ADDR_WIDTH'(cmd_arg2_reg);
 
     wire [VX_DCR_ADDR_WIDTH-1:0] cmd_dcr_addr = VX_DCR_ADDR_WIDTH'(cmd_arg0_reg);
@@ -916,8 +918,10 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // COMMAND BUFFER:
 
     reg[1:0] pop_cntr;
+    reg       line_active;
     wire cmd_fifo_push = ring_buffer_read_data_valid;
-    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10);
+    wire line_done = (unpack_cmd_count != 0) && !line_active;
+    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10) & (line_done | (unpack_cmd_count == 0)  );
 
     // Zuoning: pop when IDLE because make sure prev command is done before popping next command
     // after a pop, there is a two cycle delay for the state to change for this pop. so we want to wait two cycles after a pop to make sure the state is in IDLE again before popping next command
@@ -939,8 +943,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         import cmd_pkg::*;
         localparam int MAX_CMDS = 5;
         logic [$clog2(MAX_CMDS+1)-1:0] unpack_cmd_count, num_cmds_finished_from_cl;
-        // Tracks whether current cache line's unpacked commands are being consumed
-        reg line_active;
         cmd_pkg::cmd_t                 unpack_cmds [MAX_CMDS];
 
         cacheline_cmd_unpacker #(
@@ -1007,7 +1009,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire ring_buffer_has_data = ring_buffer_num_cmds_remaining > 0 ;
     
     // Calculate host memory address for current ring buffer entry
-    // Address = base_addr + (index * entry_size), where index = ring_buffer_num_cmds_consumed
+    // Address = base_addr + (rptr * entry_size)
     // Since CCI-P uses cache-line addresses (64-byte aligned), we need to convert:
     // Cache-line address = byte_address >> 6
     wire [63:0] ring_buffer_byte_addr = host_ring_buffer_base_addr + (64'(ring_buffer_num_cmds_consumed) * 64'd64);
@@ -1048,7 +1050,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // Simple completion pulse for unpack index advance (placeholder).
     // You can refine this to include RUN/DCR completion as needed.
     // wire is_kernel_finished = cmd_mem_wr_done | cmd_mem_rd_done;
-    wire is_kernel_finished = state == STATE_IDLE && state != state_prev;
+    wire is_kernel_finished = (state == STATE_IDLE && state != state_prev) | (cci_mem_wr_req_fire & (cci_mem_wr_req_ctr == (cmd_data_size-1))); // ZUONING: can maybe remove (STATE_IDLE && state != state_prev) 
 
     always @(posedge clk) begin
         if (reset) begin
@@ -1392,7 +1394,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
       .cmd_type(cmd_type_reg),
       .cmd_io_addr(cmd_io_addr),
+    //   .cmd_io_addr(t_ccip_clAddr'(cmd_args[0])),
       .cmd_mem_addr(cmd_mem_addr),
+    //   .cmd_mem_addr(CCI_ADDR_WIDTH'(cmd_args[1])),
       .cmd_data_size(cmd_data_size),
   
       .cci_mem_wr_req_fire(cci_mem_wr_req_fire),

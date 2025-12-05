@@ -100,6 +100,21 @@ module VX_alu_unit import VX_gpu_pkg::*; #(
             .result_if  (pe_result_if[PE_IDX_INT])
         );
 
+            // ZUONING: DEBUG PRINT
+            always @(posedge clk) begin
+                if (pe_execute_if[PE_IDX_INT].valid) begin
+                    for (int lane = 0; lane < NUM_LANES; lane++) begin
+                        $display("[VECADD_INPUT blk=%0d lane=%0d] rs1=0x%016h, rs2=0x%016h, op_type=%0d, tmask=%b",
+                            block_idx, lane, 
+                            pe_execute_if[PE_IDX_INT].data.rs1_data[lane],
+                            pe_execute_if[PE_IDX_INT].data.rs2_data[lane],
+                            pe_execute_if[PE_IDX_INT].data.op_type,
+                            pe_execute_if[PE_IDX_INT].data.tmask);
+                    end
+                end
+            end
+        
+
     `ifdef EXT_M_ENABLE
         VX_alu_muldiv #(
             .INSTANCE_ID (`SFORMATF(("%s-muldiv%0d", INSTANCE_ID, block_idx))),

@@ -44,9 +44,8 @@ extern int vx_dev_init(callbacks_t* callbacks) {
     return device->flush(buffer->addr + dst_offset, host_ptr, size);
   };
 
-  callbacks->flush_commands = [](vx_buffer_h hbuffer) {
-    auto buffer = ((vx_buffer*)hbuffer);
-    auto device = ((vx_device*)buffer->device);
+  callbacks->flush_commands = [](vx_device_h hdevice) {
+    auto device = ((vx_device*)hdevice);
     return device->flush_commands();
   };
 
@@ -198,6 +197,15 @@ extern int vx_dev_init(callbacks_t* callbacks) {
     return device->download(host_ptr, buffer->addr + src_offset, size);
   };
 
+  callbacks->flush_commands = [](vx_buffer_h hbuffer) {
+    if (nullptr == hbuffer)
+      return -1;
+    auto buffer = ((vx_buffer*)hbuffer);
+    auto device = ((vx_device*)buffer->device);
+    DBGPRINT("FLUSH_COMMANDS: hbuffer=%p\n", hbuffer);
+    return device->flush_commands();
+  };
+
   callbacks->start = [](vx_device_h hdevice, vx_buffer_h hkernel, vx_buffer_h harguments) {
     if (nullptr == hdevice || nullptr == hkernel || nullptr == harguments)
       return -1;
@@ -214,6 +222,14 @@ extern int vx_dev_init(callbacks_t* callbacks) {
     DBGPRINT("READY_WAIT: hdevice=%p, timeout=%ld\n", hdevice, timeout);
     auto device = ((vx_device*)hdevice);
     return device->ready_wait(timeout);
+  };
+
+  callbacks->flush_commands = [](vx_device_h hdevice) {
+    if (nullptr == hdevice)
+      return -1;
+    DBGPRINT("FLUSH_COMMANDS: hdevice=%p\n", hdevice);
+    auto device = ((vx_device*)hdevice);
+    return device->flush_commands();
   };
 
   callbacks->dcr_read = [](vx_device_h hdevice, uint32_t addr, uint32_t* value) {

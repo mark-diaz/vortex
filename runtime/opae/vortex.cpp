@@ -508,11 +508,31 @@ public:
 
     // Allocate fresh staging buffer for this command
     StagingBuffer sb;
-    if (this->allocate_staging_for_command(asize, &sb) != 0)
+    if (this->allocate_staging_for_command(asize, &sb) != 0) {
+      fprintf(stderr, "[COMMAND BUFFER SW] Error: allocate_staging_for_command failed\n");
       return -1;
-
+    }
     // Copy host data to new staging buffer
+    fprintf(stdout, "[COMMAND BUFFER SW] About to memcpy: size=%lu, asize=%lu, sb.size=%lu\n", size, asize, sb.size);
     memcpy(sb.ptr, host_ptr, size);
+
+    // Debug prints disabled
+    // fprintf(stdout, "[COMMAND BUFFER SW] Staging buffer contents after memcpy (first 64 bytes):\n");
+    // uint64_t* sb_data = (uint64_t*)sb.ptr;
+    // for (int i = 0; i < 8; i++) {
+    //   fprintf(stdout, "  [%d]: 0x%016lx\n", i, sb_data[i]);
+    // }
+    fprintf(stdout, "[COMMAND BUFFER SW] Full cache line (64 bytes, reverse byte order):\n  ");
+    uint8_t* sb_bytes = (uint8_t*)sb.ptr;
+    for (int i = 63; i >= 0; i--) {
+      fprintf(stdout, "%02x", sb_bytes[i]);
+    }
+    fprintf(stdout, "\n");
+    fprintf(stdout, "[COMMAND BUFFER SW] Same data (normal byte order):\n  ");
+    for (int i = 0; i < 64; i++) {
+      fprintf(stdout, "%02x", sb_bytes[i]);
+    }
+    // fprintf(stdout, "\n");
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
@@ -544,24 +564,8 @@ public:
     if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
       return -1;
 
-    // if (!enqueue_command(CMD_MEM_WRITE, payload, sizeof(payload)))
-    //   return -1;
-
-    // --- Update write pointer for hardware ---
-    // size_t wptr = cmd_buffer_.used_space();
-
-    // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), {
-    //     return -1;
-    // });
-
-    // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 1), { return -1; });
-
-    // fprintf(stdout, "[COMMAND BUFFER SW] Upload command enqueued\n");
-    // flush_commands();
-    // if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
-    //   return -1;
-
-
+    // Keep upload non-blocking: do not flush or wait here
+    // The caller may flush/wait explicitly if needed.
     return 0;
   }
   
@@ -641,20 +645,23 @@ public:
 
     auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
 
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG0, sb.ioaddr >> ls_shift), {
-      return -1;
-    });
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG1, dev_addr >> ls_shift), {
-      return -1;
-    });
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG2, asize >> ls_shift), {
-      return -1;
-    });
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_TYPE, CMD_MEM_READ), {
-      return -1;
-    });
+    uint64_t arg0 = sb.ioaddr >> ls_shift;
+    uint64_t arg1 = dev_addr >> ls_shift;
+    uint64_t arg2 = asize >> ls_shift;
+    
+    fprintf(stdout, "[COMMAND BUFFER SW] MEM_READ: staging_ioaddr=0x%lx (bytes), dev_addr_lines=0x%lx, size_lines=%lu\n", sb.ioaddr, arg1, arg2);
+    
+    // Build 24-byte payload
+    uint8_t payload[24];
+    memcpy(payload + 0,  &arg0, 8);
+    memcpy(payload + 8,  &arg1, 8);
+    memcpy(payload + 16, &arg2, 8);
 
-    // Wait for the write operation to finish
+    // Push command into command buffer
+    if (!enqueue_command(CMD_MEM_READ, payload, sizeof(payload)))
+      return -1;
+
+    // Wait for the read operation to finish
     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
       return -1;
 
@@ -679,10 +686,14 @@ public:
       return err;
     });
 
-    // start execution
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_TYPE, CMD_RUN), {
+    // start execution - enqueue CMD_RUN to ring buffer
+    fprintf(stdout, "[COMMAND BUFFER SW] CMD_RUN: krnl_addr=0x%016lx, args_addr=0x%016lx\n", krnl_addr, args_addr);
+    
+    uint8_t payload[8];
+    memset(payload, 0, sizeof(payload));
+    
+    if (!enqueue_command(CMD_RUN, payload, sizeof(payload)))
       return -1;
-    });
 
     // clear mpm cache
     mpm_cache_.clear();
@@ -750,15 +761,21 @@ public:
   }
 
   int dcr_write(uint32_t addr, uint32_t value) {
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG0, addr), {
+    uint64_t arg0 = addr;
+    uint64_t arg1 = value;
+    
+    fprintf(stdout, "[COMMAND BUFFER SW] DCR_WRITE: CMD_ARG0 (addr)=0x%016lx, CMD_ARG1 (value)=0x%016lx\n", arg0, arg1);
+    
+    // Build 16-byte payload
+    uint8_t payload[16];
+    memcpy(payload + 0,  &arg0, 8);
+    memcpy(payload + 8,  &arg1, 8);
+    // memset(payload + 16, 0, 8);
+    
+    // Push DCR_WRITE command into ring buffer
+    if (!enqueue_command(CMD_DCR_WRITE, payload, sizeof(payload)))
       return -1;
-    });
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_ARG1, value), {
-      return -1;
-    });
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_CMD_TYPE, CMD_DCR_WRITE), {
-      return -1;
-    });
+    
     dcrs_.write(addr, value);
     return 0;
   }
@@ -782,11 +799,15 @@ public:
   }
 
   int flush_commands() {
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 1), { return -1; });
+    std::cout << "[COMMAND BUFFER SW] Flushing command buffer..." << std::endl;
+    size_t bytes_written = cmd_buffer_.used_space();
+    std::cout << "[COMMAND BUFFER SW]  command buffer bytes_written: " << bytes_written << " bytes" << std::endl;
+    std::cout << "[COMMAND BUFFER SW] Number of bytes written: " << bytes_written << std::endl;
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, (bytes_written % 64 > 0 ) ? bytes_written/64+1 : bytes_written/64), { return -1; });
 
-    
+    std::cout << "[COMMAND BUFFER SW] start writing to MMIO_FLUSH to 1 " << std::endl;
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, 1), { return -1; });
-    fprintf(stdout, "[COMMAND BUFFER SW] Finish writing to MMIO_FLUSH \n");
+    std::cout << "[COMMAND BUFFER SW] Finish writing to MMIO_FLUSH " << std::endl;
     return 0;
   }
 
@@ -798,10 +819,29 @@ private:
     if (!cmd_buffer_.push_command(cmd_type, payload, payload_size))
         return false;
 
+    // Print command buffer contents after enqueue
+    size_t bytes_used = cmd_buffer_.used_space();
+    std::cout << std::dec
+          << "[COMMAND BUFFER SW] Enqueued command: cmd_type=" << cmd_type
+          << ", payload_size=" << payload_size
+          << ", total_bytes_used=" << bytes_used << std::endl;
+              
+    // fprintf(stdout, "[COMMAND BUFFER SW] After enqueue: cmd_type=%u, payload_size=%zu, total_bytes=%zu\n", 
+    //         cmd_type, payload_size, bytes_used);
+    // fprintf(stdout, "[COMMAND BUFFER SW] Command buffer contents (first 128 bytes):\n");
+    // uint8_t* buf_data = cmd_buffer_.data();
+    // for (size_t i = 0; i < std::min(bytes_used, (size_t)128); i += 16) {
+    //   fprintf(stdout, "  [%04zx]: ", i);
+    //   for (size_t j = 0; j < 16 && (i + j) < bytes_used; j++) {
+    //     fprintf(stdout, "%02x ", buf_data[i + j]);
+    //   }
+    //   fprintf(stdout, "\n");
+    // }
+
     // size_t wptr = cmd_buffer_.used_space();
 
     // TODO: change from 1 to wptr
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
+    // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_WPTR, 1), { return -1; });
 
     // MMIO_RING_BUFFER_NUM_CMD_REMAINING
     // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, 1), { return -1; });
@@ -823,11 +863,12 @@ private:
 
     // Get the physical address of the buffer in the accelerator
     CHECK_FPGA_ERR(api_.fpgaGetIOAddress(fpga_, sb.wsid, &sb.ioaddr), {
+      // fprintf(stderr, "[COMMAND BUFFER SW] Error: fpgaGetIOAddress failed\n");
       api_.fpgaReleaseBuffer(fpga_, sb.wsid);
       return -1;
     });
     
-    fprintf(stdout, "[COMMAND BUFFER SW] allocate_staging_for_command: new staging @ ioaddr=0x%lx\n", sb.ioaddr);
+    // fprintf(stdout, "[COMMAND BUFFER SW] allocate_staging_for_command: new staging @ ioaddr=0x%lx\n", sb.ioaddr);
 
     // Track for cleanup
     staging_buffers_.push_back(sb);
