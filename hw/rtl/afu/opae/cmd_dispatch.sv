@@ -60,7 +60,9 @@ module cmd_dispatch import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import V
 
     // Output
     output logic            [STATE_WIDTH-1:0] output_state,
-    output logic            output_vx_reset
+    output logic            output_vx_reset,
+
+    output logic            is_run_finished
 );
 
     // Silence unused parameter warnings (if any) without breaking port list syntax
@@ -192,5 +194,7 @@ module cmd_dispatch import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import V
     // Output
     assign output_state = state;
     assign output_vx_reset = vx_reset;
+
+    assign is_run_finished = (state==STATE_RUN) & ~vx_busy_wait & ~vx_busy;
 
 endmodule

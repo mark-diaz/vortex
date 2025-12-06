@@ -223,9 +223,11 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam MAX_RING_BUFFER_CMDS = 16; // Zuoning
     localparam MAX_RING_BUFFER_CMDS_WIDTH = `CLOG2(MAX_RING_BUFFER_CMDS);
     localparam CMD_HEADER_WIDTH = 4*8; // Zuoning
+    /* verilator lint_off UNUSEDPARAM */
     localparam CMD_ARG0_WIDTH = 8*8; // Zuoning
     localparam CMD_ARG1_WIDTH = 8*8; // Zuoning
     localparam CMD_ARG2_WIDTH = 8*8; // Zuoning
+    /* verilator lint_on UNUSEDPARAM */
 
     wire [127:0] afu_id = `AFU_ACCEL_UUID;
 
@@ -278,29 +280,29 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire [2:0][63:0] cmd_args;      // Muxed output (assigned later)
 
     /* verilator lint_off UNUSEDSIGNAL */
-    reg[CMD_ARG0_WIDTH-1:0] cmd_arg0_reg;
-    reg[CMD_ARG1_WIDTH-1:0] cmd_arg1_reg;
-    reg[CMD_ARG2_WIDTH-1:0] cmd_arg2_reg;
-    reg[CMD_TYPE_WIDTH-1:0] cmd_type_reg;
+    // reg[CMD_ARG0_WIDTH-1:0] cmd_arg0_reg;
+    // reg[CMD_ARG1_WIDTH-1:0] cmd_arg1_reg;
+    // reg[CMD_ARG2_WIDTH-1:0] cmd_arg2_reg;
+    // reg[CMD_TYPE_WIDTH-1:0] cmd_type_reg;
     /* verilator lint_on UNUSEDSIGNAL */
      
 
     t_ccip_clAddr cmd_io_addr;
-    assign cmd_io_addr = t_ccip_clAddr'(cmd_arg0_reg);
+    assign cmd_io_addr = t_ccip_clAddr'(cmd_args[0]);
 
 
-    // wire [CCI_ADDR_WIDTH-1:0] cmd_mem_addr  = CCI_ADDR_WIDTH'(cmd_args[1]);
-    // wire [CCI_ADDR_WIDTH-1:0] cmd_data_size = CCI_ADDR_WIDTH'(cmd_args[2]);
+    wire [CCI_ADDR_WIDTH-1:0] cmd_mem_addr  = CCI_ADDR_WIDTH'(cmd_args[1]);
+    wire [CCI_ADDR_WIDTH-1:0] cmd_data_size = CCI_ADDR_WIDTH'(cmd_args[2]);
 
-    // wire [VX_DCR_ADDR_WIDTH-1:0] cmd_dcr_addr = VX_DCR_ADDR_WIDTH'(cmd_args[0]);
-    // wire [VX_DCR_DATA_WIDTH-1:0] cmd_dcr_data = VX_DCR_DATA_WIDTH'(cmd_args[1]);
+    wire [VX_DCR_ADDR_WIDTH-1:0] cmd_dcr_addr = VX_DCR_ADDR_WIDTH'(cmd_args[0]);
+    wire [VX_DCR_DATA_WIDTH-1:0] cmd_dcr_data = VX_DCR_DATA_WIDTH'(cmd_args[1]);
 
-    wire [CCI_ADDR_WIDTH-1:0] cmd_mem_addr  = CCI_ADDR_WIDTH'(cmd_arg1_reg);
+    // wire [CCI_ADDR_WIDTH-1:0] cmd_mem_addr  = CCI_ADDR_WIDTH'(cmd_arg1_reg);
      
-    wire [CCI_ADDR_WIDTH-1:0] cmd_data_size = CCI_ADDR_WIDTH'(cmd_arg2_reg);
+    // wire [CCI_ADDR_WIDTH-1:0] cmd_data_size = CCI_ADDR_WIDTH'(cmd_arg2_reg);
 
-    wire [VX_DCR_ADDR_WIDTH-1:0] cmd_dcr_addr = VX_DCR_ADDR_WIDTH'(cmd_arg0_reg);
-    wire [VX_DCR_DATA_WIDTH-1:0] cmd_dcr_data = VX_DCR_DATA_WIDTH'(cmd_arg1_reg);
+    // wire [VX_DCR_ADDR_WIDTH-1:0] cmd_dcr_addr = VX_DCR_ADDR_WIDTH'(cmd_arg0_reg);
+    // wire [VX_DCR_DATA_WIDTH-1:0] cmd_dcr_data = VX_DCR_DATA_WIDTH'(cmd_arg1_reg);
     // MMIO controller ////////////////////////////////////////////////////////
 
     t_ccip_c0_ReqMmioHdr mmio_req_hdr;
@@ -602,9 +604,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         end
         else begin
             // Clear flush only when ring buffer is empty (all commands consumed)
-            if (ring_buffer_num_cmds_remaining == 0) begin
-                flush_ctr <= '0;
-            end
+            // if (ring_buffer_num_cmds_remaining == 0) begin
+            //     flush_ctr <= '0;
+            // end
         end
     end
 
@@ -633,6 +635,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     
     wire ring_buffer_empty_start_popping_kernel_fifo = ring_buffer_num_cmds_remaining == 0;
 
+    wire is_run_finished;
+
     // Note: This module includes the COMMAND FSM from the original vortex AFU
     cmd_dispatch #(
         .CCI_ADDR_WIDTH(CCI_ADDR_WIDTH),
@@ -655,8 +659,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         .clk              (clk), 
         .reset            (reset), 
 
-        // .cmd_type         (cmd_type), // Zuoning: replaced with cmd_type_reg
-        .cmd_type         (cmd_type_reg),
+        .cmd_type         (cmd_type), // Zuoning: replaced with cmd_type_reg
+        // .cmd_type         (cmd_type_reg),
         .cmd_mem_rd_done  (cmd_mem_rd_done),
         .cmd_mem_wr_done  (cmd_mem_wr_done),
 
@@ -669,7 +673,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         .cmd_dcr_data     (cmd_dcr_data),
 
         .output_state     (state),
-        .output_vx_reset  (vx_reset)
+        .output_vx_reset  (vx_reset),
+        .is_run_finished  (is_run_finished)
     );
 
     // AVS Controller /////////////////////////////////////////////////////////
@@ -921,7 +926,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     reg       line_active;
     wire cmd_fifo_push = ring_buffer_read_data_valid;
     wire line_done = (unpack_cmd_count != 0) && !line_active;
-    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10) & (line_done | (unpack_cmd_count == 0)  );
+    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10) & (line_done | (unpack_cmd_count == 0)  ) & flush;
 
     // Zuoning: pop when IDLE because make sure prev command is done before popping next command
     // after a pop, there is a two cycle delay for the state to change for this pop. so we want to wait two cycles after a pop to make sure the state is in IDLE again before popping next command
@@ -984,7 +989,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // Unified command completion pulse (extend later for RUN/DCR etc.)
     wire cmd_done = is_kernel_finished; // TODO: include RUN/DCR completion pulses
     // Drive unpack consumption whenever line_active and index < count
-    wire use_unpacked = line_active && (unpack_cmd_count != 0) && (num_cmds_finished_from_cl < unpack_cmd_count);
+    wire use_unpacked = line_active && (unpack_cmd_count != 0) && (num_cmds_finished_from_cl < unpack_cmd_count) ;
     assign cmd_header       = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].opcode[CMD_HEADER_WIDTH-1:0] : {CMD_HEADER_WIDTH{1'b0}};
     assign fifo_cmd_args[0] = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].arg0 : 64'b0;
     assign fifo_cmd_args[1] = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].arg1 : 64'b0;
@@ -1028,40 +1033,44 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                              && (cp2af_sRxPort.c0.hdr.mdata[15:8] == RB_MDATA_TAG);
     
     // Decode helpers
+    /* verilator lint_off UNUSEDSIGNAL */
     wire [511:0] cache_line = cp2af_sRxPort.c0.data; //{<<8{cp2af_sRxPort.c0.data}}
     wire [31:0] rb_cmd_type = cache_line[31:0];
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // 40-byte payload starting at byte offset 4
     
     // localparam int LS_SHIFT = 6;
 
-    wire [191:0] rb_payload = cache_line[223:32];
-    wire [63:0] cmd_arg2 = (rb_payload[191:128]); // << LS_SHIFT
-    wire [63:0] cmd_arg1 = (rb_payload[127:64]);
-    wire [63:0] cmd_arg0 = (rb_payload[63:0]);
+    // wire [191:0] rb_payload = cache_line[223:32];
+    // wire [63:0] cmd_arg2 = (rb_payload[191:128]); // << LS_SHIFT
+    // wire [63:0] cmd_arg1 = (rb_payload[127:64]);
+    // wire [63:0] cmd_arg0 = (rb_payload[63:0]);
 
-    `UNUSED_VAR (cache_line);
-    `UNUSED_VAR (rb_cmd_type);
-    `UNUSED_VAR (rb_payload);
-    `UNUSED_VAR (cmd_arg0);
-    `UNUSED_VAR (cmd_arg1);
-    `UNUSED_VAR (cmd_arg2);
+    // `UNUSED_VAR (cache_line);
+    // `UNUSED_VAR (rb_cmd_type);
+    // `UNUSED_VAR (rb_payload);
+    // `UNUSED_VAR (cmd_arg0);
+    // `UNUSED_VAR (cmd_arg1);
+    // `UNUSED_VAR (cmd_arg2);
 
     // Simple completion pulse for unpack index advance (placeholder).
     // You can refine this to include RUN/DCR completion as needed.
     // wire is_kernel_finished = cmd_mem_wr_done | cmd_mem_rd_done;
-    wire is_kernel_finished = (state == STATE_IDLE && state != state_prev) | (cci_mem_wr_req_fire & (cci_mem_wr_req_ctr == (cmd_data_size-1))); // ZUONING: can maybe remove (STATE_IDLE && state != state_prev) 
+    // wire is_kernel_finished = (state == STATE_IDLE && state != state_prev) | (cci_mem_wr_req_fire & (cci_mem_wr_req_ctr == (cmd_data_size-1))); // ZUONING: can maybe remove (STATE_IDLE && state != state_prev) 
 
+    wire is_kernel_finished = (state==STATE_RUN & is_run_finished) | (state==STATE_DCR_WRITE) | (state==STATE_MEM_WRITE & cmd_mem_wr_done) | (state==STATE_MEM_READ & cmd_mem_rd_done) ; // ZUONING: can maybe remove (STATE_IDLE && state != state_prev)
+    // wire is_kernel_finished = (state==STATE_MEM_READ & cmd_mem_rd_done) | (state==STATE_MEM_WRITE & cmd_mem_wr_done) | (state==STATE_DCR_WRITE) | (STATE_RUN==state & !vx_busy_wait & ~vx_busy); // ZUONING: can maybe remove (STATE_IDLE && state != state_prev)
     always @(posedge clk) begin
         if (reset) begin
             ring_buffer_read_req_valid <= 0;
             ring_buffer_read_pending <= 0;
             ring_buffer_read_data_valid <= 0;
-            cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
+            // cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
             line_active <= 1'b0;
-            cmd_arg0_reg <= 64'h0;
-            cmd_arg1_reg <= 64'h0;
-            cmd_arg2_reg <= 64'h0;
+            // cmd_arg0_reg <= 64'h0;
+            // cmd_arg1_reg <= 64'h0;
+            // cmd_arg2_reg <= 64'h0;
             pop_cntr <= 2'b0;
         end else begin
             // Clear data valid after one cycle
@@ -1113,19 +1122,19 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             end
 
             if (use_unpacked) begin
-                cmd_arg0_reg <= cmd_args[0];
-                cmd_arg1_reg <= cmd_args[1];
-                cmd_arg2_reg <= cmd_args[2];
-                cmd_type_reg <= cmd_type;
+                // cmd_arg0_reg <= cmd_args[0];
+                // cmd_arg1_reg <= cmd_args[1];
+                // cmd_arg2_reg <= cmd_args[2];
+                // cmd_type_reg <= cmd_type;
 
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
                 `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
             end
-            else begin
-                cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
-            end
+            // else begin
+            //     cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
+            // end
 
             // Advance to next command within cache line on completion
             if (cmd_done && line_active && use_unpacked) begin
@@ -1392,7 +1401,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
       .clk(clk),
       .reset( reset ),      
 
-      .cmd_type(cmd_type_reg),
+      .cmd_type(cmd_type),
       .cmd_io_addr(cmd_io_addr),
     //   .cmd_io_addr(t_ccip_clAddr'(cmd_args[0])),
       .cmd_mem_addr(cmd_mem_addr),
@@ -1534,7 +1543,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
       .clk(clk),
       .reset(reset),
       
-      .cmd_type(cmd_type_reg),
+      .cmd_type(cmd_type),
       .cmd_io_addr(cmd_io_addr),
       .cmd_mem_addr(cmd_mem_addr),
       .cmd_data_size(cmd_data_size),
@@ -1658,14 +1667,14 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     end
 
 
-    reg [STATE_WIDTH-1:0] state_prev;
-    always @(posedge clk) begin
-        if (reset)
-            state_prev <= STATE_IDLE;
-        else begin
-            state_prev <= state;
-        end
-    end
+    // reg [STATE_WIDTH-1:0] state_prev;
+    // always @(posedge clk) begin
+    //     if (reset)
+    //         state_prev <= STATE_IDLE;
+    //     else begin
+    //         state_prev <= state;
+    //     end
+    // end
 
     // SCOPE //////////////////////////////////////////////////////////////////
 
