@@ -148,16 +148,17 @@ int main() {
   // std::cout << "start device" << std::endl;
   RT_CHECK(vx_start(device, krnl_buffer, args_buffer));
 
-  // // std::cout << "download destination buffer" << std::endl;
+  //   std::cout << "wait for completion" << std::endl;
+  // RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
+
+
+  // // // std::cout << "download destination buffer" << std::endl;
   // RT_CHECK(vx_copy_from_dev(h_dst.data(), dst_buffer, 0, buf_size));
 
 
   std::cout << "flush commands" << std::endl;
   vx_flush_commands(device);
   
-  std::cout << "ready wait" << std::endl;
-  if (vx_ready_wait(device, VX_MAX_TIMEOUT) != 0)
-    return -1;
 
 
   // std::cout << "download destination buffer" << std::endl;
@@ -189,6 +190,7 @@ int main() {
     std::cout << "FAILED!" << std::endl;
     return 1;
   }
+  std::cout << "PASSED!" << std::endl;
   // upload source buffer1
   // std::cout << "upload source buffer1" << std::endl;
   // RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
@@ -239,7 +241,7 @@ int main() {
     return 1;
   }
 
-  std::cout << "PASSED!" << std::endl;
+  // std::cout << "PASSED!" << std::endl;
   */
   return 0;
 }

@@ -195,6 +195,6 @@ module cmd_dispatch import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import V
     assign output_state = state;
     assign output_vx_reset = vx_reset;
 
-    assign is_run_finished = (state==STATE_RUN) & ~vx_busy_wait & ~vx_busy;
+    assign is_run_finished = (state==STATE_RUN) & ~vx_busy_wait & ~vx_busy & ~vx_reset;
 
 endmodule

@@ -463,7 +463,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             16'h0006: mmio_rsp.data <= 64'h0; // next AFU
             16'h0008: mmio_rsp.data <= 64'h0; // reserved
             MMIO_STATUS: begin
-                mmio_rsp.data <= 64'({cout_q_dout_s, ~cout_q_empty_all, 8'(state)});
+                mmio_rsp.data <= 64'({cout_q_dout_s, ~cout_q_empty_all & all_done, 8'(state)});
             `ifdef DBG_TRACE_AFU
                 if (state != STATE_WIDTH'(mmio_rsp.data)) begin
                     `TRACE(2, ("%t: AFU: MMIO_STATUS: addr=0x%0h, state=%0d\n", $time, mmio_req_hdr.address, state))
@@ -927,6 +927,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire cmd_fifo_push = ring_buffer_read_data_valid;
     wire line_done = (unpack_cmd_count != 0) && !line_active;
     wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10) & (line_done | (unpack_cmd_count == 0)  ) & flush;
+
+    wire all_done = !line_active & cmd_fifo_empty & ring_buffer_empty_start_popping_kernel_fifo & (ring_buffer_num_cmds_consumed != 0) & flush;
+
 
     // Zuoning: pop when IDLE because make sure prev command is done before popping next command
     // after a pop, there is a two cycle delay for the state to change for this pop. so we want to wait two cycles after a pop to make sure the state is in IDLE again before popping next command
@@ -1757,20 +1760,46 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     ///////////////////////////////////////////////////////////////////////////
 
-`ifdef DBG_TRACE_AFU
-    always @(posedge clk) begin
-        for (integer i = 0; i < NUM_LOCAL_MEM_BANKS; ++i) begin
-            if (avs_write[i] && ~avs_waitrequest[i]) begin
-                `TRACE(2, ("%t: AVS Wr Req[%0d]: addr=0x%0h, byteen=0x%0h, burst=0x%0h, data=0x%h\n", $time, i, `TO_FULL_ADDR(avs_address[i]), avs_byteenable[i], avs_burstcount[i], avs_writedata[i]))
-            end
-            if (avs_read[i] && ~avs_waitrequest[i]) begin
-                `TRACE(2, ("%t: AVS Rd Req[%0d]: addr=0x%0h, byteen=0x%0h,  burst=0x%0h\n", $time, i, `TO_FULL_ADDR(avs_address[i]), avs_byteenable[i], avs_burstcount[i]))
-            end
-            if (avs_readdatavalid[i]) begin
-                `TRACE(2, ("%t: AVS Rd Rsp[%0d]: data=0x%h\n", $time, i, avs_readdata[i]))
+// `ifdef DBG_TRACE_AFU
+//     always @(posedge clk) begin
+//         for (integer i = 0; i < NUM_LOCAL_MEM_BANKS; ++i) begin
+//             if (avs_write[i] && ~avs_waitrequest[i]) begin
+//                 `TRACE(2, ("%t: AVS Wr Req[%0d]: addr=0x%0h, byteen=0x%0h, burst=0x%0h, data=0x%h\n", $time, i, `TO_FULL_ADDR(avs_address[i]), avs_byteenable[i], avs_burstcount[i], avs_writedata[i]))
+//             end
+//             if (avs_read[i] && ~avs_waitrequest[i]) begin
+//                 `TRACE(2, ("%t: AVS Rd Req[%0d]: addr=0x%0h, byteen=0x%0h,  burst=0x%0h\n", $time, i, `TO_FULL_ADDR(avs_address[i]), avs_byteenable[i], avs_burstcount[i]))
+//             end
+//             if (avs_readdatavalid[i]) begin
+//                 `TRACE(2, ("%t: AVS Rd Rsp[%0d]: data=0x%h\n", $time, i, avs_readdata[i]))
+//             end
+//         end
+//     end
+// `endif
+
+
+    reg[2:0] pop_cnt;
+    
+
+    always@(posedge clk) begin
+        if (reset) begin
+            pop_cnt <= 3'b0;
+        end else begin
+            if (cmd_fifo_pop) begin
+                pop_cnt <= pop_cnt + 3'b1;
             end
         end
+
+        if (cmd_fifo_pop) begin
+          `TRACE(2, ("%t:[ZUONING HW]: ring_buffer_num_cmds_consumed=%d  pop_cnt=%d\n", $time, ring_buffer_num_cmds_consumed, pop_cnt));
+        end
+
+        if (cmd_done && line_active && use_unpacked) begin
+            `TRACE(2, ("%t:[ZUONING HW]: num_cmds_finished_from_cl=%d , cmd_type=%d unpack_cmd_count=%d\n", $time, num_cmds_finished_from_cl, cmd_type, unpack_cmd_count));
+        end
+        
     end
-`endif
+
+
+    
 
 endmodule
