@@ -207,6 +207,10 @@ public:
     return 0;
   }
 
+  int flush() {
+    return -1;
+  }
+
   int ready_wait(uint64_t timeout) {
     if (!future_.valid())
       return 0;
