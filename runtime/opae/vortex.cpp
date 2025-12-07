@@ -474,8 +474,8 @@ public:
       "  curr_commands      = %u\n"
       "  new_commands       = %u\n"
       "  block_count        = %u\n"
-      "  flush_base_addr        = 0x%lx (in ring buffer)\n"
-      "  base_io_addr       = 0x%lx (device-visible)\n"
+      "  flush_base_offset  = 0x%lx (in ring buffer)\n"
+      "  IO_flush_base_addr = 0x%lx (device-visible)\n"
       "  flush_count(before)= %zu\n",
       prev_commands,
       num_commands,

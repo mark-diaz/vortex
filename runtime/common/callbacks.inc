@@ -182,9 +182,8 @@ extern int vx_dev_init(callbacks_t* callbacks) {
   callbacks->flush = [](vx_device_h hdevice) {
     if (nullptr == hdevice)
       return  -1;
-    auto device = ((vx_device*)hdevice);
     DBGPRINT("FLUSH: hdevice=%p \n", hdevice);
-    
+    auto device = ((vx_device*)hdevice);
     return device->flush();
   };
 
