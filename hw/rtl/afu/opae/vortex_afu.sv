@@ -18,6 +18,9 @@
 `else
 `include "vortex_afu.vh"
 `endif
+`include "command_engine.sv"
+`include "ccip_read_req.sv"
+`include "ccip_write_req.sv"
 
 module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_gpu_pkg::*; #(
     parameter NUM_LOCAL_MEM_BANKS = 2
@@ -734,9 +737,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     wire cci_rd_req_fire;
     t_ccip_clAddr cci_rd_req_addr;
-    reg cci_rd_req_valid, cci_rd_req_wait;
     reg [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr;
-    wire [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr_next;
     wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_req_tag;
 
     wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_tag;
@@ -765,100 +766,60 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     assign cci_rdq_pop  = cci_mem_wr_req_fire;
     assign cci_rdq_din  = {cp2af_sRxPort.c0.data, cci_mem_wr_req_addr_base + CCI_ADDR_WIDTH'(cci_rd_rsp_tag)};
 
-    wire [`CLOG2(CCI_RD_QUEUE_SIZE+1)-1:0] cci_pending_reads;
-    wire cci_pending_reads_full;
-    VX_pending_size #(
-        .SIZE (CCI_RD_QUEUE_SIZE)
-    ) cci_rd_pending_size (
-        .clk   (clk),
-        .reset (reset),
-        .incr  (cci_rd_req_fire),
-        .decr  (cci_rdq_pop),
-        `UNUSED_PIN (empty),
-        `UNUSED_PIN (alm_empty),
-        .full  (cci_pending_reads_full),
-        `UNUSED_PIN (alm_full),
-        .size  (cci_pending_reads)
-    );
-
-    `UNUSED_VAR (cci_pending_reads)
-
-    assign cci_rd_req_ctr_next = cci_rd_req_ctr + CCI_ADDR_WIDTH'(cci_rd_req_fire ? 1 : 0);
-
-    assign cci_rd_req_fire = cci_rd_req_valid && !(cci_rd_req_wait || cci_pending_reads_full);
+    `UNUSED_VAR (cci_rd_req_ctr)
+    `UNUSED_VAR (cci_rd_rsp_ctr)
 
     assign cci_mem_wr_req_valid = !cci_rdq_empty;
 
     assign cci_mem_wr_req_addr = cci_rdq_dout[CCI_ADDR_WIDTH-1:0];
 
-    // Send read requests to CCI
-    always @(posedge clk) begin
-        if (reset) begin
-            cci_rd_req_valid <= 0;
-            cci_rd_req_wait  <= 0;
-        end else begin
-            if ((STATE_IDLE == state)
-             && (CMD_MEM_WRITE == cmd_type)) begin
-                cci_rd_req_valid <= (cmd_data_size != 0);
-                cci_rd_req_wait  <= 0;
-            end
+    ccip_read_req #(
 
-            cci_rd_req_valid <= (STATE_MEM_WRITE == state)
-                             && (cci_rd_req_ctr_next != cmd_data_size)
-                             && !cp2af_sRxPort.c0TxAlmFull;
+        .CCI_RD_WINDOW_SIZE(CCI_RD_WINDOW_SIZE),
+        .CCI_ADDR_WIDTH(CCI_ADDR_WIDTH),    
+        .CCI_RD_QUEUE_SIZE(CCI_RD_QUEUE_SIZE), 
+        .CCI_RD_QUEUE_TAGW(CCI_RD_QUEUE_TAGW), 
 
-            if (cci_rd_req_fire
-             && (cci_rd_req_tag == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1))) begin
-                cci_rd_req_wait <= 1; // end current request batch
-            end
+        .STATE_IDLE(STATE_IDLE),     
+        .STATE_MEM_WRITE(STATE_MEM_WRITE),
+        .STATE_DCR_WRITE(STATE_DCR_WRITE),
+        .STATE_WIDTH(STATE_WIDTH),
 
-            if (cci_rd_rsp_fire
-             && (cci_rd_rsp_ctr == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1))) begin
-                cci_rd_req_wait <= 0; // begin new request batch
-            end
-        end
+        .CMD_TYPE_WIDTH(CMD_TYPE_WIDTH),
+        .CMD_MEM_WRITE(CMD_MEM_WRITE)
 
-        if ((STATE_IDLE == state)
-         && (CMD_MEM_WRITE == cmd_type)) begin
-            cci_rd_req_addr    <= cmd_io_addr;
-            cci_rd_req_ctr     <= '0;
-            cci_rd_rsp_ctr     <= '0;
-            cci_mem_wr_req_ctr <= '0;
-            cci_mem_wr_req_addr_base <= cmd_mem_addr;
-            cmd_mem_wr_done     <= 0;
-        end
+    ) CCIP_READ_CONTROLLER (
 
-        if (cci_rd_req_fire) begin
-            cci_rd_req_addr <= cci_rd_req_addr + 1;
-            cci_rd_req_ctr  <= cci_rd_req_ctr + $bits(cci_rd_req_ctr)'(1);
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Req: addr=0x%0h, tag=0x%0h, rem=%0d, pending=%0d\n", $time, cci_rd_req_addr, cci_rd_req_tag, (cmd_data_size - cci_rd_req_ctr - 1), cci_pending_reads))
-        `endif
-        end
+        .clk(clk),
+        .reset( reset ),      
 
-        if (cci_rd_rsp_fire) begin
-            cci_rd_rsp_ctr <= cci_rd_rsp_ctr + CCI_RD_QUEUE_TAGW'(1);
-            if (CCI_RD_QUEUE_TAGW'(cci_rd_rsp_ctr) == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1)) begin
-                cci_mem_wr_req_addr_base <= cci_mem_wr_req_addr_base + CCI_ADDR_WIDTH'(CCI_RD_WINDOW_SIZE);
-            end
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Rsp: idx=%0d, ctr=%0d, data=0x%h\n", $time, cci_rd_rsp_tag, cci_rd_rsp_ctr, cp2af_sRxPort.c0.data))
-        `endif
-        end
+        .cmd_type(cmd_type),
+        .cmd_io_addr(cmd_io_addr),
+        .cmd_mem_addr(cmd_mem_addr),
+        .cmd_data_size(cmd_data_size),
 
-        if (cci_rdq_pop) begin
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Queue Pop: pending=%0d\n", $time, cci_pending_reads))
-        `endif
-        end
+        .cci_mem_wr_req_fire(cci_mem_wr_req_fire),
+        .cci_rd_req_tag(cci_rd_req_tag),
+        .cci_rd_rsp_tag(cci_rd_rsp_tag),
+        .cci_rd_rsp_fire(cci_rd_rsp_fire),
 
-        if (cci_mem_wr_req_fire) begin
-            cci_mem_wr_req_ctr <= cci_mem_wr_req_ctr + CCI_ADDR_WIDTH'(1);
-            if (cci_mem_wr_req_ctr == (cmd_data_size-1)) begin
-                cmd_mem_wr_done <= 1;
-            end
-        end
-    end
+        .state(state),
+        .c0_data(cp2af_sRxPort.c0.data),
+        .c0TxAlmFull(cp2af_sRxPort.c0TxAlmFull),
+
+        .cci_rdq_pop(cci_rdq_pop),
+
+        .output_cci_mem_wr_req_ctr(cci_mem_wr_req_ctr),
+        .output_cci_mem_wr_req_addr_base(cci_mem_wr_req_addr_base),
+
+        .output_cci_rd_req_fire(cci_rd_req_fire),
+        .output_cci_rd_req_addr(cci_rd_req_addr),
+        .output_cci_rd_req_ctr(cci_rd_req_ctr),
+        .output_cci_rd_rsp_ctr(cci_rd_rsp_ctr),
+
+        .output_cmd_mem_wr_done(cmd_mem_wr_done)
+
+    );
 
     VX_fifo_queue #(
         .DATAW (CCI_RD_QUEUE_DATAW),
@@ -926,20 +887,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire cci_pending_writes_empty;
     wire cci_pending_writes_full;
 
-    VX_pending_size #(
-        .SIZE (CCI_RW_PENDING_SIZE)
-    ) cci_wr_pending_size (
-        .clk   (clk),
-        .reset (reset),
-        .incr  (cci_mem_rd_rsp_fire),
-        .decr  (cci_wr_rsp_fire),
-        .empty (cci_pending_writes_empty),
-        `UNUSED_PIN (alm_empty),
-        .full  (cci_pending_writes_full),
-        `UNUSED_PIN (alm_full),
-        .size  (cci_pending_writes)
-    );
-
     `UNUSED_VAR (cci_pending_writes)
 
     assign cci_mem_rd_req_valid = (STATE_MEM_READ == state) && ~cci_mem_rd_req_done;
@@ -948,51 +895,50 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     assign cmd_mem_rd_done = cci_wr_req_done && cci_pending_writes_empty;
 
-    // Send write requests to CCI
-    always @(posedge clk) begin
-        if (reset) begin
-            cci_wr_req_fire <= 0;
-        end else begin
-            cci_wr_req_fire <= cci_mem_rd_rsp_fire;
-        end
+    ccip_write_req #(
+        .CCI_ADDR_WIDTH(CCI_ADDR_WIDTH),
+        .CCI_DATA_WIDTH(CCI_DATA_WIDTH),
+        .CCI_RW_PENDING_SIZE(CCI_RW_PENDING_SIZE),
 
-        if ((STATE_IDLE == state)
-        &&  (CMD_MEM_READ == cmd_type)) begin
-            cci_mem_rd_req_ctr  <= '0;
-            cci_mem_rd_req_addr <= cmd_mem_addr;
-            cci_mem_rd_req_done <= 0;
-            cci_wr_req_ctr      <= cmd_data_size;
-            cci_wr_req_done     <= 0;
-        end
+        .STATE_IDLE(STATE_IDLE),
+        .STATE_DCR_WRITE(STATE_DCR_WRITE),
+        .STATE_WIDTH(STATE_WIDTH),
 
-        if (cci_mem_rd_req_fire) begin
-            cci_mem_rd_req_addr <= cci_mem_rd_req_addr + CCI_ADDR_WIDTH'(1);
-            cci_mem_rd_req_ctr  <= cci_mem_rd_req_ctr + CCI_ADDR_WIDTH'(1);
-            if (cci_mem_rd_req_ctr == (cmd_data_size-1)) begin
-                cci_mem_rd_req_done <= 1;
-            end
-        end
+        .CMD_TYPE_WIDTH(CMD_TYPE_WIDTH),
+        .CMD_MEM_READ(CMD_MEM_READ)
 
-        cci_wr_req_addr <= cmd_io_addr + t_ccip_clAddr'(cci_mem_rsp_tag);
-        cci_wr_req_data <= t_ccip_clData'(cci_mem_rsp_data);
+    ) CCIP_WRITE_FSM (
+        .clk(clk),
+        .reset(reset),
 
-        if (cci_wr_req_fire) begin
-            `ASSERT(cci_wr_req_ctr != 0, ("runtime error"));
-            cci_wr_req_ctr <= cci_wr_req_ctr - CCI_ADDR_WIDTH'(1);
-            if (cci_wr_req_ctr == CCI_ADDR_WIDTH'(1)) begin
-            cci_wr_req_done <= 1;
-            end
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Wr Req: addr=0x%0h, rem=%0d, pending=%0d, data=0x%h\n", $time, cci_wr_req_addr, (cci_wr_req_ctr - 1), cci_pending_writes, af2cp_sTxPort.c1.data))
-        `endif
-        end
+        .cmd_type(cmd_type),
+        .cmd_io_addr(cmd_io_addr),
+        .cmd_mem_addr(cmd_mem_addr),
+        .cmd_data_size(cmd_data_size),
 
-        if (cci_wr_rsp_fire) begin
-        `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Wr Rsp: pending=%0d\n", $time, cci_pending_writes))
-        `endif
-        end
-    end
+        .cci_mem_rd_req_fire(cci_mem_rd_req_fire),
+        .cci_mem_rd_rsp_fire(cci_mem_rd_rsp_fire),
+        .cci_wr_rsp_fire(cci_wr_rsp_fire),
+        .cci_mem_rsp_tag(cci_mem_rsp_tag),
+        .cci_mem_rsp_data(cci_mem_rsp_data),
+
+        .state(state),
+        .c1_data(af2cp_sTxPort.c1.data),
+        .cci_pending_writes(cci_pending_writes),
+
+        .output_cci_wr_req_fire(cci_wr_req_fire),
+        .output_cci_wr_req_done(cci_wr_req_done),
+        .output_cci_mem_rd_req_ctr(cci_mem_rd_req_ctr),
+        .output_cci_mem_rd_req_addr(cci_mem_rd_req_addr),
+        .output_cci_wr_req_ctr(cci_wr_req_ctr),
+        .output_cci_mem_rd_req_done(cci_mem_rd_req_done),
+        .output_cci_wr_req_addr(cci_wr_req_addr),
+        .output_cci_wr_req_data(cci_wr_req_data),
+        .output_cci_pending_writes_full(cci_pending_writes_full),
+        .output_cci_pending_writes_empty(cci_pending_writes_empty),
+        .output_pending_size(cci_pending_writes)
+    );
+    `UNUSED_VAR (cci_wr_req_ctr)
 
     //--
 
