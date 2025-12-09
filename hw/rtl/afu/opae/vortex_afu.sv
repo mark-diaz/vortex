@@ -18,7 +18,8 @@
 `else
 `include "vortex_afu.vh"
 `endif
-`include "command_engine.sv"
+`include "cmd_buffer_fetch.sv"
+`include "command_execute.sv"
 `include "ccip_read_req.sv"
 `include "ccip_write_req.sv"
 
@@ -87,6 +88,10 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam MMIO_CMD_ARG0      = `AFU_IMAGE_MMIO_CMD_ARG0;
     localparam MMIO_CMD_ARG1      = `AFU_IMAGE_MMIO_CMD_ARG1;
     localparam MMIO_CMD_ARG2      = `AFU_IMAGE_MMIO_CMD_ARG2;
+    `UNUSED_PARAM(MMIO_CMD_ARG0);
+    `UNUSED_PARAM(MMIO_CMD_ARG1);
+    `UNUSED_PARAM(MMIO_CMD_ARG2);
+
     localparam MMIO_STATUS        = `AFU_IMAGE_MMIO_STATUS;
 
     localparam COUT_TID_WIDTH     = `CLOG2(VX_MEM_BYTEEN_WIDTH);
@@ -107,9 +112,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam CCI_RD_QUEUE_TAGW  = `CLOG2(CCI_RD_WINDOW_SIZE);
     localparam CCI_RD_QUEUE_DATAW = CCI_DATA_WIDTH + CCI_ADDR_WIDTH;
 
-    localparam FLUSH_QUEUE_SIZE   = 16; 
-    localparam CMD_ARG_WIDTH      = 64;
-    localparam HALF_CMD_ARG_WIDTH = 64 / 2;
+    localparam FLUSH_QUEUE_SIZE      = 16;
+    localparam CMD_BUFFER_QUEUE_SIZE = 2 * CCI_RD_WINDOW_SIZE;
+    `UNUSED_PARAM(CMD_BUFFER_QUEUE_SIZE);
+    localparam CMD_ARG_WIDTH         = 64;
+    localparam HALF_CMD_ARG_WIDTH    = 64 / 2;
+    localparam CMD_BUFFER_REQ_DATA_WIDTH = CCI_ADDR_WIDTH + HALF_CMD_ARG_WIDTH;
 
     localparam FLUSH_QUEUE_DATAW  = CMD_ARG_WIDTH + CCI_ADDR_WIDTH; 
 
@@ -153,8 +161,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire                            vx_mem_rsp_ready [VX_MEM_PORTS];
 
     // CMD variables //////////////////////////////////////////////////////////
-
+    /* verilator lint_off UNDRIVEN */
     reg [2:0][63:0] cmd_args;
+    /* verilator lint_on UNDRIVEN */
 
     t_ccip_clAddr cmd_io_addr;
     assign cmd_io_addr = t_ccip_clAddr'(cmd_args[0]);
@@ -284,37 +293,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 `endif
 `endif
 
-    // FLUSH QUEUE ////////////////////////////////////////////////////////////
-    wire [FLUSH_QUEUE_DATAW-1:0] flush_q_din;
-    wire [FLUSH_QUEUE_DATAW-1:0] flush_q_dout;
-    wire flush_q_push, flush_q_pop;
-    wire flush_q_empty;
-
-    assign flush_q_din = {cmd_buffer_num_blocks, cmd_buffer_num_commands, cmd_buffer_base_addr};
-    assign flush_q_push = flush_fire;
-    assign flush_q_pop = !flush_q_empty;
-    `UNUSED_VAR(flush_q_dout)
-
-    VX_fifo_queue #(
-        .DATAW (FLUSH_QUEUE_DATAW),
-        .DEPTH (FLUSH_QUEUE_SIZE)
-    ) flush_queue (
-        .clk      (clk),
-        .reset    (reset),
-        .push     (flush_q_push),
-        .pop      (flush_q_pop),
-        .data_in  (flush_q_din),
-        .data_out (flush_q_dout),
-        .empty    (flush_q_empty), 
-
-        `UNUSED_PIN (full),
-        `UNUSED_PIN (alm_empty),
-        `UNUSED_PIN (alm_full),
-        `UNUSED_PIN (size)
-    );
-
-
-
     // MMIO controller ////////////////////////////////////////////////////////
 
     // Handle MMIO read requests
@@ -390,66 +368,153 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         if (reset) begin
             flush_fire <= 0;
         end
-        else if (cp2af_sRxPort.c0.mmioWrValid) begin
+        else begin
+            
             flush_fire <= 0;
 
-            case (mmio_req_hdr.address)
-            MMIO_CMD_BUFFER_FLUSH: begin
-                flush_fire <= 1;
-                cmd_buffer_num_blocks <= cp2af_sRxPort.c0.data[63:32];
-                cmd_buffer_num_commands <= cp2af_sRxPort.c0.data[31:0];
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_COMMANDS = 0x%h \n", $time, cp2af_sRxPort.c0.data[63:32]))
-                `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_BLOCKS = 0x%h \n", $time, cp2af_sRxPort.c0.data[31:0]))
-            `endif
-            end
-            MMIO_CMD_BUFFER_BASE_ADDR : begin
-                cmd_buffer_base_addr <= CCI_ADDR_WIDTH'(cp2af_sRxPort.c0.data);
+            if (cp2af_sRxPort.c0.mmioWrValid) begin
+
+                case (mmio_req_hdr.address)
+                MMIO_CMD_BUFFER_FLUSH: begin
+                    flush_fire <= 1;
+                    cmd_buffer_num_blocks <= cp2af_sRxPort.c0.data[63:32];
+                    cmd_buffer_num_commands <= cp2af_sRxPort.c0.data[31:0];
                 `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: MMIO_CMD_BUFFER_BASE_ADDR: data=0x%h \n", $time, 64'(cp2af_sRxPort.c0.data)))
+                    `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_COMMANDS = 0x%h \n", $time, cp2af_sRxPort.c0.data[63:32]))
+                    `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_BLOCKS = 0x%h \n", $time, cp2af_sRxPort.c0.data[31:0]))
                 `endif
-            end
-            // TODO: Remove                
-            MMIO_CMD_ARG0: begin
-                cmd_args[0] <= 64'(cp2af_sRxPort.c0.data);
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_ARG0: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            MMIO_CMD_ARG1: begin
-                cmd_args[1] <= 64'(cp2af_sRxPort.c0.data);
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_ARG1: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            MMIO_CMD_ARG2: begin
-                cmd_args[2] <= 64'(cp2af_sRxPort.c0.data);
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_ARG2: data=%0d\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            MMIO_CMD_TYPE: begin
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_TYPE: data=%0d\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            `ifdef SCOPE
-            MMIO_SCOPE_WRITE: begin
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_SCOPE_WRITE: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            `endif
-            default: begin
+                end
+                MMIO_CMD_BUFFER_BASE_ADDR : begin
+                    cmd_buffer_base_addr <= CCI_ADDR_WIDTH'(cp2af_sRxPort.c0.data);
+                    `ifdef DBG_TRACE_AFU
+                    `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: MMIO_CMD_BUFFER_BASE_ADDR: data=0x%h \n", $time, 64'(cp2af_sRxPort.c0.data)))
+                    `endif
+                end
+                `ifdef SCOPE
+                MMIO_SCOPE_WRITE: begin
                 `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: Unknown MMIO Wr: addr=0x%0h, data=0x%h\n", $time, mmio_req_hdr.address, 64'(cp2af_sRxPort.c0.data)))
+                    `TRACE(2, ("%t: AFU: MMIO_SCOPE_WRITE: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
                 `endif
+                end
+                `endif
+                default: begin
+                    `ifdef DBG_TRACE_AFU
+                    `TRACE(2, ("%t: Unknown MMIO Wr: addr=0x%0h, data=0x%h\n", $time, mmio_req_hdr.address, 64'(cp2af_sRxPort.c0.data)))
+                    `endif
+                end
+                endcase
             end
-            endcase
         end
     end
 
-    // COMMAND ENGINE /////////////////////////////////////////////////////////
+    // FLUSH QUEUE ////////////////////////////////////////////////////////////
+    wire [FLUSH_QUEUE_DATAW-1:0] flush_q_din;
+    wire [FLUSH_QUEUE_DATAW-1:0] flush_q_dout;
+    wire flush_q_push, flush_q_pop;
+    wire flush_q_empty;
+
+    assign flush_q_din = {cmd_buffer_num_blocks, cmd_buffer_num_commands, cmd_buffer_base_addr};
+    assign flush_q_push = flush_fire;
+    `UNUSED_VAR(flush_q_dout)
+
+    VX_fifo_queue #(
+        .DATAW (FLUSH_QUEUE_DATAW),
+        .DEPTH (FLUSH_QUEUE_SIZE)
+    ) flush_queue (
+        .clk      (clk),
+        .reset    (reset),
+        .push     (flush_q_push),
+        .pop      (flush_q_pop),
+        .data_in  (flush_q_din),
+        .data_out (flush_q_dout),
+        .empty    (flush_q_empty), 
+
+        `UNUSED_PIN (full),
+        `UNUSED_PIN (alm_empty),
+        `UNUSED_PIN (alm_full),
+        `UNUSED_PIN (size)
+    );
+
+    // CCI-P Read Request Arbiter //////////////////////////////////////////////
+
+    wire [1:0] read_req_valid_in;
+    wire [1:0][CMD_BUFFER_REQ_DATA_WIDTH-1:0] read_req_data_in;
+    wire [1:0] read_req_ready_in;
+    
+    wire read_req_valid_out;
+    wire [CMD_BUFFER_REQ_DATA_WIDTH-1:0] read_req_data_out;
+     
+    wire read_req_ready_out; // assign it from the read req
+    assign read_req_ready_out = 1'b1; // TODO: fixme
+
+
+    `UNUSED_VAR(read_req_valid_out);
+    `UNUSED_VAR(read_req_data_out);
+
+    wire red_req_sel_out;
+    `UNUSED_VAR(red_req_sel_out);
+
+    VX_stream_arb #(
+        .NUM_INPUTS (2),
+        .NUM_OUTPUTS(1),
+        .DATAW      (CMD_BUFFER_REQ_DATA_WIDTH),
+        .ARBITER    ("R")
+    ) read_req_arb (
+        .clk       (clk),
+        .reset     (reset),
+        .valid_in  (read_req_valid_in),
+        .data_in   (read_req_data_in),
+        .ready_in  (read_req_ready_in),
+        .valid_out (read_req_valid_out),
+        .data_out  (read_req_data_out),
+        .ready_out (read_req_ready_out),
+        .sel_out   (red_req_sel_out)
+    );    
+
+    // attribute queue to identify requester 
+
+    // store the number of commands on a command buffer tag else just store zeros
+
+    // COMMAND FETCH //////////////////////////////////////////////////////////
+    wire [HALF_CMD_ARG_WIDTH-1:0] num_blocks;
+    wire [HALF_CMD_ARG_WIDTH-1:0] num_commands;
+    wire [CCI_ADDR_WIDTH-1:0]     base_addr; 
+
+    assign num_blocks   = flush_q_dout[CCI_ADDR_WIDTH + 2*HALF_CMD_ARG_WIDTH -1 : CCI_ADDR_WIDTH + HALF_CMD_ARG_WIDTH];
+    assign num_commands = flush_q_dout[CCI_ADDR_WIDTH + HALF_CMD_ARG_WIDTH -1 : CCI_ADDR_WIDTH];
+    assign base_addr    = flush_q_dout[CCI_ADDR_WIDTH-1 : 0];
+
+    wire cmd_buffer_fetch_ready;
+
+    assign flush_q_pop = !flush_q_empty && cmd_buffer_fetch_ready;
+
+    cmd_buffer_fetch #(
+        .CCI_ADDR_WIDTH           (CCI_ADDR_WIDTH),
+        .HALF_CMD_ARG_WIDTH       (HALF_CMD_ARG_WIDTH),
+        .CMD_BUFFER_REQ_DATA_WIDTH(CMD_BUFFER_REQ_DATA_WIDTH)
+    ) cmd_buffer_fetch_inst (
+        // global signals
+        .clk                    (clk),
+        .reset                  (reset),
+
+        // flush queue fields
+        .cmd_buffer_fetch_fire  (flush_q_pop),
+        .num_blocks             (num_blocks),
+        .num_commands           (num_commands),
+        .base_addr              (base_addr),
+
+        // arbiter
+        .read_req_arb_ready     (read_req_ready_in[1]),
+        .cmd_buffer_fetch_ready (cmd_buffer_fetch_ready),
+
+        // outputs
+        .read_cmd_buffer_req_data (read_req_data_in[1]),
+        .read_cmd_buffer_valid     (read_req_valid_in[1])
+    );
+
+    // COMMAND DECODE /////////////////////////////////////////////////////////
+    
+    // COMMAND EXECUTE ////////////////////////////////////////////////////////
 
     wire cmd_mem_rd_done;
     reg  cmd_mem_wr_done;
@@ -460,7 +525,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire is_mmio_wr_cmd = cp2af_sRxPort.c0.mmioWrValid && (MMIO_CMD_TYPE == mmio_req_hdr.address);
     wire [CMD_TYPE_WIDTH-1:0] cmd_type = is_mmio_wr_cmd ? CMD_TYPE_WIDTH'(cp2af_sRxPort.c0.data) : CMD_TYPE_WIDTH'(CMD_IDLE);
 
-    command_engine #(
+    assign read_req_data_in[0] = {cmd_io_addr, HALF_CMD_ARG_WIDTH'(0)};
+    
+    command_execute #(
         .CCI_ADDR_WIDTH (CCI_ADDR_WIDTH),
         .RESET_CTR_WIDTH(RESET_CTR_WIDTH),
         .STATE_IDLE     (STATE_IDLE),
@@ -475,20 +542,21 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         .CMD_RUN        (CMD_RUN),
         .CMD_TYPE_WIDTH (CMD_TYPE_WIDTH)
     ) command_fsm (
-        .clk            (clk),
-        .reset          (reset),
-        .cmd_type       (cmd_type),
-        .cmd_mem_rd_done(cmd_mem_rd_done),
-        .cmd_mem_wr_done(cmd_mem_wr_done),
-        .vx_busy        (vx_busy),
-
-        .cmd_io_addr    (cmd_io_addr),
-        .cmd_mem_addr   (cmd_mem_addr),
-        .cmd_data_size  (cmd_data_size),
-        .cmd_dcr_addr   (cmd_dcr_addr),
-        .cmd_dcr_data   (cmd_dcr_data),
-        .output_state   (state),
-        .output_vx_reset(vx_reset)
+        .clk                (clk),
+        .reset              (reset),
+        .cmd_type           (cmd_type),
+        .cmd_mem_rd_done    (cmd_mem_rd_done),
+        .cmd_mem_wr_done    (cmd_mem_wr_done),
+        .vx_busy            (vx_busy),
+        .cmd_io_addr        (cmd_io_addr),
+        .cmd_mem_addr       (cmd_mem_addr),
+        .cmd_data_size      (cmd_data_size),
+        .cmd_dcr_addr       (cmd_dcr_addr),
+        .cmd_dcr_data       (cmd_dcr_data),
+        .read_req_arb_ready (read_req_ready_in[0]),
+        .mem_req_valid      (read_req_valid_in[0]),
+        .output_state       (state),
+        .output_vx_reset    (vx_reset)
     );
 
     // AVS Controller /////////////////////////////////////////////////////////
@@ -1124,13 +1192,66 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 `TRACE(2, ("%t: AVS Rd Rsp[%0d]: data=0x%h\n", $time, i, avs_readdata[i]))
             end
         end
-        if (flush_fire) begin 
-            `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: FLUSH FIRE: NUM_BLOCKS=0x%h \n", $time, cmd_buffer_num_blocks))
-            `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: FLUSH FIRE: NUM_COMMANDS=0x%h \n", $time, cmd_buffer_num_commands))
-            `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: FLUSH FIRE: CMD_BUFFER_BASE_ADDR=0x%h \n", $time, cmd_buffer_base_addr))
+    end
+
+    // Flush queue debug
+    always @(posedge clk) begin
+        // On push: show what enters the queue
+        if (flush_q_push) begin
+            `TRACE(2, ("%t [CMD_BUF] FLUSH_PUSH: din=0x%h  blocks=%0d cmds=%0d base=0x%h\n",
+                        $time, flush_q_din, flush_q_din[FLUSH_QUEUE_DATAW-1 : FLUSH_QUEUE_DATAW-HALF_CMD_ARG_WIDTH],
+                        flush_q_din[FLUSH_QUEUE_DATAW-HALF_CMD_ARG_WIDTH-1 : FLUSH_QUEUE_DATAW-2*HALF_CMD_ARG_WIDTH],
+                        flush_q_din[CCI_ADDR_WIDTH-1 : 0]))
         end
-        if (flush_q_pop) begin 
-            `TRACE(2, ("%t [COMMAND BUFFER HW] AFU: FLUSH QUEUE POP: DOUT=0x%h \n", $time, flush_q_dout))
+
+        // On pop: show what comes out
+        if (flush_q_pop && !flush_q_empty) begin
+            `TRACE(2, ("%t [CMD_BUF] FLUSH_POP: dout=0x%h  blocks=%0d cmds=%0d base=0x%h\n",
+                        $time, flush_q_dout,
+                        flush_q_dout[FLUSH_QUEUE_DATAW-1 : FLUSH_QUEUE_DATAW-HALF_CMD_ARG_WIDTH],
+                        flush_q_dout[FLUSH_QUEUE_DATAW-HALF_CMD_ARG_WIDTH-1 : FLUSH_QUEUE_DATAW-2*HALF_CMD_ARG_WIDTH],
+                        flush_q_dout[CCI_ADDR_WIDTH-1 : 0]))
+        end
+
+        // Detect empty pop attempt
+        if (flush_q_pop && flush_q_empty) begin
+            `TRACE(2, ("%t [CMD_BUF][WARN] POP attempted on EMPTY queue\n", $time))
+        end
+
+        // Detect queue fill (optional)
+        if (flush_q_push && !flush_q_pop && flush_q_empty === 1'b0) begin
+            `TRACE(2, ("%t [CMD_BUF] Queue size changed (push)\n", $time))
+        end
+    end
+
+    // Read request arbiter debug
+    always @(posedge clk) begin
+        // Input 0 = command_execute
+        if (read_req_valid_in[0] && read_req_ready_in[0]) begin
+            `TRACE(2, ("%t [READ_REQ_ARB] FIRE from EXECUTE: data=0x%h\n", $time, read_req_data_in[0]))
+        end
+
+        // Input 1 = cmd_buffer_fetch
+        if (read_req_valid_in[1] && read_req_ready_in[1]) begin
+            `TRACE(2, ("%t [READ_REQ_ARB] FIRE from CMD_BUFFER_FETCH: data=0x%h\n", $time, read_req_data_in[1]))
+        end
+
+        // Arbiter selection + output event
+        if (read_req_valid_out && read_req_ready_out) begin
+            `TRACE(2, ("%t [READ_REQ_ARB] SELECT=%0d OUT: data=0x%h\n", $time, red_req_sel_out, read_req_data_out))
+        end
+
+        // Optional: print when arbiter backpressures
+        if (read_req_valid_out && ~read_req_ready_out) begin
+            `TRACE(2, ("%t [READ_REQ_ARB] BACKPRESSURE: valid_out=1 ready_out=0\n", $time))
+        end
+
+        // Optional: print ready_in signals
+        if (read_req_valid_in[0] && !read_req_ready_in[0]) begin
+            `TRACE(2, ("%t [READ_REQ_ARB] READY_IN0=0 (stall EXECUTE)\n", $time))
+        end
+        if (read_req_valid_in[1] && !read_req_ready_in[1]) begin
+            `TRACE(2, ("%t [READ_REQ_ARB] READY_IN1=0 (stall FETCH)\n", $time))
         end
     end
 `endif

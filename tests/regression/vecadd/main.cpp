@@ -114,6 +114,7 @@ int main() {
   std::cout << "upload source buffer0" << std::endl;
   RT_CHECK(vx_copy_to_dev(src0_buffer, h_src0.data(), 0, buf_size));
   RT_CHECK(vx_flush(device));
+  RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
 
   // upload source buffer1
   // std::cout << "upload source buffer1" << std::endl;

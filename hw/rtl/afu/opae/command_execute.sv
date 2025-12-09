@@ -19,7 +19,7 @@
 `include "VX_define.vh"
 
 
-module command_engine import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_gpu_pkg::*; #(
+module command_execute import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_gpu_pkg::*; #(
 
     parameter CCI_ADDR_WIDTH      = $bits(t_ccip_clAddr),
     parameter RESET_CTR_WIDTH     = `CLOG2(`RESET_DELAY+1),
@@ -54,6 +54,11 @@ module command_engine import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import
     
     input  logic            [VX_DCR_ADDR_WIDTH-1:0] cmd_dcr_addr,
     input  logic            [VX_DCR_DATA_WIDTH-1:0] cmd_dcr_data,
+
+    // arbiter
+    input logic  read_req_arb_ready,
+    output logic mem_req_valid,
+
 
     // Output
     output logic            [STATE_WIDTH-1:0] output_state,
@@ -92,10 +97,19 @@ module command_engine import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import
                         end
 
                         CMD_MEM_WRITE: begin
-                        `ifdef DBG_TRACE_AFU
-                            `TRACE(2, ("%t: AFU: Goto STATE MEM_WRITE: ia=0x%0h addr=0x%0h size=%0d\n", $time, cmd_io_addr, cmd_mem_addr, cmd_data_size))
-                        `endif
-                            state <= STATE_MEM_WRITE;
+
+                            // Only transition to MEM_WRITE if the read request arbiter is ready
+                            if (read_req_arb_ready) begin
+                                state <= STATE_MEM_WRITE;
+                            `ifdef DBG_TRACE_AFU
+                                `TRACE(2, ("%t: AFU: Goto STATE MEM_WRITE: ia=0x%0h addr=0x%0h size=%0d\n", $time, cmd_io_addr, cmd_mem_addr, cmd_data_size))
+                            `endif
+                            end
+                            else begin 
+                            `ifdef DBG_TRACE_AFU
+                                `TRACE(2, ("%t: AFU: DONT Goto STATE MEM_WRITE: ARBITER DELAY ia=0x%0h addr=0x%0h size=%0d\n", $time, cmd_io_addr, cmd_mem_addr, cmd_data_size))
+                            `endif                            
+                            end
                         end
 
                         CMD_DCR_WRITE: begin
@@ -154,7 +168,8 @@ module command_engine import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import
                         vx_busy_wait <= 1;
                         vx_reset <= 0;
                     end
-                end else begin
+                end 
+                else begin
                     if (vx_busy_wait) begin
                         // wait until processor goes busy
                         if (vx_busy) begin
@@ -169,7 +184,7 @@ module command_engine import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import
                             `endif
                             state <= STATE_IDLE;
                         end
-                        end
+                    end
                 end
             end
             default:;
@@ -181,6 +196,7 @@ module command_engine import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import
     end
 
     // Output
+    assign mem_req_valid = (state == STATE_MEM_WRITE);
     assign output_state = state;
     assign output_vx_reset = vx_reset;
 
