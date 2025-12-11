@@ -517,9 +517,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     always @(posedge clk) begin
         // Update flush unconditionally from flush_ctr
         flush <= flush_ctr;
-        if (flush_ctr) begin
-             `TRACE(2, ("%t: [COMMAND BUFFER HW] : Setting flush to flush=%d \n", $time, flush_ctr))
-        end
+        // if (flush_ctr) begin
+        //      `TRACE(2, ("%t: [COMMAND BUFFER HW] : Setting flush to flush=%d \n", $time, flush_ctr))
+        // end
         
         io_addr_packet <= io_addr_packet_ctr;
 
@@ -1286,9 +1286,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
           cci_rd_req_ctr_packet  <= cci_rd_req_ctr_packet + $bits(cci_rd_req_ctr_packet)'(1);
   
-          `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Req (PACKET): addr=0x%0h, tag=0x%0h\n", $time, cci_rd_req_addr_packet, cci_rd_req_tag_packet)) 
-          `endif
+        //   `ifdef DBG_TRACE_AFU
+        //     `TRACE(2, ("%t: AFU: CCI Rd Req (PACKET): addr=0x%0h, tag=0x%0h\n", $time, cci_rd_req_addr_packet, cci_rd_req_tag_packet)) 
+        //   `endif
  
       end
 
@@ -1296,9 +1296,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
       if (cci_rd_rsp_fire_packet) begin
           cci_rd_rsp_ctr_packet <= cci_rd_rsp_ctr_packet + CCI_RD_QUEUE_TAGW'(1);
   
-          `ifdef DBG_TRACE_AFU
-            `TRACE(2, ("%t: AFU: CCI Rd Rsp (PACKET): idx=%0d, ctr=%0d, data=0x%h\n", $time, cci_rd_rsp_tag_packet, cci_rd_rsp_ctr_packet, cp2af_sRxPort.c0.data))
-          `endif
+        //   `ifdef DBG_TRACE_AFU
+        //     `TRACE(2, ("%t: AFU: CCI Rd Rsp (PACKET): idx=%0d, ctr=%0d, data=0x%h\n", $time, cci_rd_rsp_tag_packet, cci_rd_rsp_ctr_packet, cp2af_sRxPort.c0.data))
+        //   `endif
       end
     end
 
