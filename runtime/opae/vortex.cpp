@@ -110,6 +110,8 @@ public:
     , tail_(0)
     , curr_offset_(0)
     , size_(0)
+    , num_commands_(0)
+    , num_cache_blocks_(0)
   {}
 
   bool push_command(uint32_t cmd_type, const void* payload, size_t payload_size) {
@@ -122,6 +124,7 @@ public:
       if (!write_bytes(nullptr, pad))  // zero pad
         return false;
       curr_offset_ = 0;
+      num_cache_blocks_++;  // Count completed cache block
     }
 
     if (!write_bytes(&hdr, sizeof(CmdHeader)))
@@ -131,11 +134,24 @@ public:
       return false;
 
     curr_offset_ += total;
+    num_commands_++;  // Count command
     return true;
   }
 
   size_t used_space() const {
     return size_;
+  }
+
+  size_t num_commands() const {
+    return num_commands_;
+  }
+
+  size_t num_cache_blocks() const {
+    // Account for partial cache block at the end
+    if (curr_offset_ > 0) {
+      return num_cache_blocks_ + 1;
+    }
+    return num_cache_blocks_;
   }
 
   uint8_t* data() {
@@ -170,6 +186,8 @@ private:
   size_t head_, tail_;
   size_t curr_offset_;
   size_t size_;
+  size_t num_commands_;
+  size_t num_cache_blocks_;
 };
 
 class vx_device {
@@ -811,12 +829,17 @@ public:
   int flush_commands() {
     std::cout << "[COMMAND BUFFER SW] Flushing command buffer..." << std::endl;
     size_t bytes_written = cmd_buffer_.used_space();
-    std::cout << "[COMMAND BUFFER SW]  command buffer bytes_written: " << bytes_written << " bytes" << std::endl;
-    std::cout << "[COMMAND BUFFER SW] Number of bytes written: " << bytes_written << std::endl;
+    size_t num_cmds = cmd_buffer_.num_commands();
+    size_t num_blocks = cmd_buffer_.num_cache_blocks();
+    std::cout << "[COMMAND BUFFER SW] Number of commands: " << num_cmds << std::endl;
+    std::cout << "[COMMAND BUFFER SW] Number of 64-byte cache blocks: " << num_blocks << std::endl;
+    std::cout << "[COMMAND BUFFER SW] Total bytes written: " << bytes_written << " bytes" << std::endl;
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_RING_BUFFER_NUM_CMD_REMAINING, (bytes_written % 64 > 0 ) ? bytes_written/64+1 : bytes_written/64), { return -1; });
 
-    std::cout << "[COMMAND BUFFER SW] start writing to MMIO_FLUSH to 1 " << std::endl;
-    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, 1), { return -1; });
+    // Encode NUM_BLOCKS in upper 32 bits, NUM_CMDS in lower 32 bits
+    uint64_t flush_value = ((uint64_t)num_blocks << 32) | (uint64_t)num_cmds;
+    std::cout << "[COMMAND BUFFER SW] Writing MMIO_FLUSH: 0x" << std::hex << flush_value << std::dec << " [NUM_BLOCKS=" << num_blocks << ", NUM_CMDS=" << num_cmds << "]" << std::endl;
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, flush_value), { return -1; });
     std::cout << "[COMMAND BUFFER SW] Finish writing to MMIO_FLUSH " << std::endl;
     return 0;
   }
