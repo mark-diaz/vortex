@@ -375,34 +375,34 @@ public:
 }
 
   int flush(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
-    // if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
-    //   return -1;
+    if (!is_aligned(dev_addr, CACHE_BLOCK_SIZE))
+      return -1;
 
-    // auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
+    auto asize = aligned_size(size, CACHE_BLOCK_SIZE);
 
-    // if (dev_addr + asize > global_mem_size_)
-    //   return -1;
+    if (dev_addr + asize > global_mem_size_)
+      return -1;
 
-    // // ensure ready for new command
-    // // if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
-    // //   return -1;
-
-    // // Allocate fresh staging buffer for this command
-    // StagingBuffer sb;
-    // if (this->allocate_staging_for_command(asize, &sb) != 0)
-    //   return -1;
-
-    // // Copy host data to new staging buffer
-    // memcpy(sb.ptr, host_ptr, size);
-
-    // auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
-
-    // CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, sb.ioaddr >> ls_shift), {
-    //   return -1;
-    // });
-
+    // ensure ready for new command
     // if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
     //   return -1;
+
+    // Allocate fresh staging buffer for this command
+    StagingBuffer sb;
+    if (this->allocate_staging_for_command(asize, &sb) != 0)
+      return -1;
+
+    // Copy host data to new staging buffer
+    memcpy(sb.ptr, host_ptr, size);
+
+    auto ls_shift = (int)std::log2(CACHE_BLOCK_SIZE);
+
+    CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, sb.ioaddr >> ls_shift), {
+      return -1;
+    });
+
+    if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
+      return -1;
 
     return 0;
   }
@@ -713,7 +713,7 @@ public:
     // to milliseconds
     uint64_t sleep_time_ms = (sleep_time.tv_sec * 1000) + (sleep_time.tv_nsec / 1000000);
 
-    uint32_t state_zzn ;
+    // uint32_t state_zzn ;
 
     for (;;) {
       uint64_t status;
@@ -731,7 +731,7 @@ public:
           auto &ss_buf = print_bufs[cout_tid];
           ss_buf << cout_char;
           if (cout_char == '\n') {
-            std::cout << std::dec << "#[VXDRV ZUONING]" << cout_tid << ": " << ss_buf.str() << std::flush;
+            // std::cout << std::dec << "#[VXDRV ZUONING]" << cout_tid << ": " << ss_buf.str() << std::flush;
             ss_buf.str("");
           }
           CHECK_FPGA_ERR(api_.fpgaReadMMIO64(fpga_, 0, MMIO_STATUS, &status), {
@@ -742,11 +742,11 @@ public:
       }
 
       uint32_t state = status & ((1 << STATUS_STATE_BITS) - 1);
-      state_zzn = state;
-      fprintf(stdout, "[VXDRV ZUONING] ready-wait before 0 == state || 0 == timeout state=%d\n", state);
+      // state_zzn = state;
+      // fprintf(stdout, "[VXDRV ZUONING] ready-wait before 0 == state || 0 == timeout state=%d\n", state);
 
       if (0 == state || 0 == timeout) {
-        fprintf(stdout, "[VXDRV ZUONING] Inside 0 == state || 0 == timeout)\n");
+        // fprintf(stdout, "[VXDRV ZUONING] Inside 0 == state || 0 == timeout)\n");
         for (auto &buf : print_bufs) {
           auto str = buf.second.str();
           if (!str.empty()) {
@@ -764,7 +764,7 @@ public:
       timeout -= sleep_time_ms;
     };
 
-    fprintf(stdout, "[VXDRV ZUONING] ready-wait ended, state_zzn=%d\n", state_zzn);
+    // fprintf(stdout, "[VXDRV ZUONING] ready-wait ended, state_zzn=%d\n", state_zzn);
 
 
     return 0;

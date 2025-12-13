@@ -301,6 +301,11 @@ public:
     return 0;
   }
 
+   // COMMAND BUFFER: stub
+  int flush_commands() {
+    return 0;
+  }
+
   int download(void *dest, uint64_t src_addr, uint64_t size) {
     uint64_t asize = aligned_size(size, CACHE_BLOCK_SIZE);
     if (src_addr + asize > GLOBAL_MEM_SIZE)

@@ -55,6 +55,11 @@ public:
     return 0;
   }
 
+  // COMMAND BUFFER: stub
+  int flush_commands() {
+    return 0;
+  }
+
   int flush(uint64_t dev_addr, const void *host_ptr, uint64_t size) {
     (void)dev_addr;   // Cast to void to mark as intentionally unused
     (void)host_ptr;

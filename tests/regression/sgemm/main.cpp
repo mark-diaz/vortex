@@ -131,6 +131,9 @@ void cleanup() {
 
 int main(int argc, char *argv[]) {
   // parse command arguments
+
+  auto time_start = std::chrono::high_resolution_clock::now();
+
   parse_args(argc, argv);
 
   std::srand(50);
@@ -191,7 +194,6 @@ int main(int argc, char *argv[]) {
   std::cout << "upload kernel argument" << std::endl;
   RT_CHECK(vx_upload_bytes(device, &kernel_arg, sizeof(kernel_arg_t), &args_buffer));
 
-  auto time_start = std::chrono::high_resolution_clock::now();
 
   // start device
   std::cout << "start device" << std::endl;
@@ -201,13 +203,16 @@ int main(int argc, char *argv[]) {
   std::cout << "wait for completion" << std::endl;
   RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
 
-  auto time_end = std::chrono::high_resolution_clock::now();
-  double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();
-  printf("Elapsed time: %lg ms\n", elapsed);
+
+  vx_flush_commands(device);
 
   // download destination buffer
   std::cout << "download destination buffer" << std::endl;
   RT_CHECK(vx_copy_from_dev(h_C.data(), C_buffer, 0, buf_size));
+  
+  auto time_end = std::chrono::high_resolution_clock::now();
+  double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();
+  printf("EVALUATION: Elapsed time: %lg ms\n", elapsed);
 
   // verify result
   std::cout << "verify result" << std::endl;

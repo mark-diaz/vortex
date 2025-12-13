@@ -319,6 +319,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     reg[RB_PTR_WIDTH-1:0] ring_buffer_rptr;
     reg [63:0] host_ring_buffer_base_addr;
 
+    `UNUSED_VAR(ring_buffer_wptr)
+    `UNUSED_VAR(ring_buffer_rptr)
+
     // Ring buffer read control
     reg ring_buffer_read_req_valid;
     wire ring_buffer_read_req_ready;
@@ -544,7 +547,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 flush_ctr <= 1'b1;
 
             
-                `TRACE(2, ("%t: AFU: MMIO_FLUSH ZZZZZZ: data=0x%h  flush=%d . cmd_fifo_empty=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush, cmd_fifo_empty))
+                `TRACE(2, ("%t: AFU: MMIO_FLUSH: data=0x%h  flush=%d . cmd_fifo_empty=%d \n", $time, 64'(cp2af_sRxPort.c0.data), flush, cmd_fifo_empty))
             
             end
             MMIO_HOST_RING_BUFFER_BASE_ADDR : begin
@@ -1083,9 +1086,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             // Issue new read request when data available and not pending
             if (ring_buffer_has_data && !ring_buffer_read_pending && !ring_buffer_read_req_valid && flush) begin
                 ring_buffer_read_req_valid <= 1;
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Req: rptr=%0d, wptr=%0d, cl_addr=0x%0h, pending=%0b, c0TxAlmFull=%0b\n", $time, ring_buffer_rptr, ring_buffer_wptr, ring_buffer_cl_addr, ring_buffer_read_pending, cp2af_sRxPort.c0TxAlmFull))
-            `endif
+            // `ifdef DBG_TRACE_AFU
+            //     `TRACE(2, ("%t: AFU: COMMAND BUFFER: Ring Buffer Read Req: rptr=%0d, wptr=%0d, cl_addr=0x%0h, pending=%0b, c0TxAlmFull=%0b\n", $time, ring_buffer_rptr, ring_buffer_wptr, ring_buffer_cl_addr, ring_buffer_read_pending, cp2af_sRxPort.c0TxAlmFull))
+            // `endif
             end
             
             // Debug: Monitor signals every cycle when has_data
@@ -1099,9 +1102,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             if (ring_buffer_read_fire) begin
                 ring_buffer_read_req_valid <= 0;
                 ring_buffer_read_pending <= 1;
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: COMMAND BUFFER HW: Ring Buffer Read Fire: addr=0x%0h\n", $time, ring_buffer_cl_addr))
-            `endif
+            // `ifdef DBG_TRACE_AFU
+            //     `TRACE(2, ("%t: AFU: COMMAND BUFFER HW: Ring Buffer Read Fire: addr=0x%0h\n", $time, ring_buffer_cl_addr))
+            // `endif
             end
 
             // ZUONING: DEBUG
@@ -1114,10 +1117,10 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 pop_cntr <= 2'b0;
                 num_cmds_finished_from_cl <= 0; // start at first unpacked command
                 line_active <= 1'b1;            // enable unpack consumption
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] cmd_fifo_pop CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
             end
             else begin
                 // cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
@@ -1130,10 +1133,10 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 // cmd_arg2_reg <= cmd_args[2];
                 // cmd_type_reg <= cmd_type;
 
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] use_unpacked CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
             end
             // else begin
             //     cmd_type_reg <= CMD_TYPE_WIDTH'(CMD_IDLE);
@@ -1162,15 +1165,15 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
                 // Decrement remaining command count
                 ring_buffer_num_cmds_remaining <= ring_buffer_num_cmds_remaining - 1;
                 ring_buffer_num_cmds_consumed <= ring_buffer_num_cmds_consumed + 1;
-            `ifdef DBG_TRACE_AFU
+            // `ifdef DBG_TRACE_AFU
                 // `TRACE(2, ("%t: AFU: COMMAND BUFFER: Read Rsp: data=0x%h\n", $time, cp2af_sRxPort.c0.data))
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] - Received Address: addr=0x%0h, data=0x%h \n", $time, host_ring_buffer_base_addr + (64'(ring_buffer_rptr) << 6), cp2af_sRxPort.c0.data))
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
-                `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] - Received Address: addr=0x%0h, data=0x%h \n", $time, host_ring_buffer_base_addr + (64'(ring_buffer_rptr) << 6), cp2af_sRxPort.c0.data))
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_TYPE: cmd=0x%08h\n", $time, cmd_type));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG0: payload(hex)=0x%016h\n", $time, cmd_args[0]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG1: payload(hex)=0x%016h\n", $time, cmd_args[1]));
+                // `TRACE(2, ("%t: AFU: [COMMAND BUFFER HW] CMD_ARG2: payload(hex)=0x%016h\n", $time, cmd_args[2]));
 
-            `endif
+            // `endif
             end
 
             // ZUONING: DEBUG print data pushed into kernel FIFO
@@ -1261,7 +1264,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
         `ifdef DBG_TRACE_AFU
           if(non_empty_cmd_fifo && (queue_now != size_packet)) begin
-            `TRACE(2, ("%t: AFU: Valid_Check (PACKET): flush=%0d, queue_now=%0d, size_packet=%0d, rd_req_valid=%0d, rd_req_fire=%d\n", $time, non_empty_cmd_fifo,queue_now,size_packet, cci_rd_req_valid_packet, cci_rd_req_fire_packet))
+            // `TRACE(2, ("%t: AFU: Valid_Check (PACKET): flush=%0d, queue_now=%0d, size_packet=%0d, rd_req_valid=%0d, rd_req_fire=%d\n", $time, non_empty_cmd_fifo,queue_now,size_packet, cci_rd_req_valid_packet, cci_rd_req_fire_packet))
           end
         `endif
  
@@ -1340,20 +1343,20 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             af2cp_sTxPort.c0.hdr.address = t_ccip_clAddr'(ring_buffer_cl_addr);
             // Tag with RB_MDATA_TAG in upper bits to identify ring buffer responses
             af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'({RB_MDATA_TAG, 8'(ring_buffer_rptr)});
-            `TRACE(2, ("%t: [COMMAND BUFFER HW] Ring Buffer Read\n", $time))
+            // `TRACE(2, ("%t: [COMMAND BUFFER HW] Ring Buffer Read\n", $time))
 
         end else if (switch_hardcode) begin
             af2cp_sTxPort.c0.valid       = cci_rd_req_fire_packet;
             af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
             af2cp_sTxPort.c0.hdr.address = cci_rd_req_addr_packet;
             af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'(cci_rd_req_tag_packet);
-            `TRACE(2, ("%t: [COMMAND BUFFER HW] switch_hardcode Read\n", $time))
+            // `TRACE(2, ("%t: [COMMAND BUFFER HW] switch_hardcode Read\n", $time))
         end else if (state == STATE_MEM_WRITE && cci_rd_req_fire) begin
             af2cp_sTxPort.c0.valid       = cci_rd_req_fire; // Zuoning: this is normal read like vx_copy_to_dev (MEM_WRITE), GPU request to read from Host
             af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
             af2cp_sTxPort.c0.hdr.address = cci_rd_req_addr;
             af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'(cci_rd_req_tag);
-            `TRACE(2, ("%t: [COMMAND BUFFER HW]  GPU request to read from Host. cci_rd_req_addr=%0h . cci_rd_req_valid=%0h .\n", $time, cci_rd_req_addr, cci_rd_req_fire))
+            // `TRACE(2, ("%t: [COMMAND BUFFER HW]  GPU request to read from Host. cci_rd_req_addr=%0h . cci_rd_req_valid=%0h .\n", $time, cci_rd_req_addr, cci_rd_req_fire))
         end
         else begin
             af2cp_sTxPort.c0.valid       = 0;
@@ -1789,13 +1792,13 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             end
         end
 
-        if (cmd_fifo_pop) begin
-          `TRACE(2, ("%t:[ZUONING HW]: ring_buffer_num_cmds_consumed=%d  pop_cnt=%d\n", $time, ring_buffer_num_cmds_consumed, pop_cnt));
-        end
+        // if (cmd_fifo_pop) begin
+        //   `TRACE(2, ("%t:[ZUONING HW]: ring_buffer_num_cmds_consumed=%d  pop_cnt=%d\n", $time, ring_buffer_num_cmds_consumed, pop_cnt));
+        // end
 
-        if (cmd_done && line_active && use_unpacked) begin
-            `TRACE(2, ("%t:[ZUONING HW]: num_cmds_finished_from_cl=%d , cmd_type=%d unpack_cmd_count=%d\n", $time, num_cmds_finished_from_cl, cmd_type, unpack_cmd_count));
-        end
+        // if (cmd_done && line_active && use_unpacked) begin
+        //     `TRACE(2, ("%t:[ZUONING HW]: num_cmds_finished_from_cl=%d , cmd_type=%d unpack_cmd_count=%d\n", $time, num_cmds_finished_from_cl, cmd_type, unpack_cmd_count));
+        // end
         
     end
 
