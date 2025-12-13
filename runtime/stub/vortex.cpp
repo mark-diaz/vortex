@@ -149,6 +149,10 @@ extern int vx_start(vx_device_h hdevice, vx_buffer_h hkernel, vx_buffer_h hargum
   return (g_callbacks.start)(hdevice, hkernel, harguments);
 }
 
+extern int vx_flush(vx_device_h hdevice) {
+  return (g_callbacks.flush)(hdevice);
+}
+
 extern int vx_ready_wait(vx_device_h hdevice, uint64_t timeout) {
   return (g_callbacks.ready_wait)(hdevice, timeout);
 }

@@ -79,11 +79,14 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam CMD_DCR_WRITE      = `AFU_IMAGE_CMD_DCR_WRITE;
     localparam CMD_RUN            = `AFU_IMAGE_CMD_RUN;
     localparam CMD_TYPE_WIDTH     = `CLOG2(`AFU_IMAGE_CMD_MAX_VALUE+1);
+    
+    localparam MMIO_CMD_BUFFER_FLUSH     = `AFU_IMAGE_MMIO_CMD_BUFFER_FLUSH;
+    localparam MMIO_CMD_BUFFER_BASE_ADDR = `AFU_IMAGE_MMIO_CMD_BUFFER_BASE_ADDR;
+    localparam MMIO_CMD_BUFFER_READ_IDX  = `AFU_IMAGE_MMIO_CMD_BUFFER_READ_IDX;
+    `UNUSED_PARAM(MMIO_CMD_BUFFER_FLUSH);
+    `UNUSED_PARAM(MMIO_CMD_BUFFER_BASE_ADDR);
+    `UNUSED_PARAM(MMIO_CMD_BUFFER_READ_IDX);
 
-    localparam MMIO_CMD_TYPE      = `AFU_IMAGE_MMIO_CMD_TYPE;
-    localparam MMIO_CMD_ARG0      = `AFU_IMAGE_MMIO_CMD_ARG0;
-    localparam MMIO_CMD_ARG1      = `AFU_IMAGE_MMIO_CMD_ARG1;
-    localparam MMIO_CMD_ARG2      = `AFU_IMAGE_MMIO_CMD_ARG2;
     localparam MMIO_STATUS        = `AFU_IMAGE_MMIO_STATUS;
 
     localparam COUT_TID_WIDTH     = `CLOG2(VX_MEM_BYTEEN_WIDTH);
@@ -138,7 +141,9 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // CMD variables //////////////////////////////////////////////////////////
 
-    reg [2:0][63:0] cmd_args;
+    wire [2:0][63:0] cmd_args;
+
+    assign cmd_args = '0;
 
     t_ccip_clAddr cmd_io_addr;
     assign cmd_io_addr = t_ccip_clAddr'(cmd_args[0]);
@@ -335,29 +340,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     always @(posedge clk) begin
         if (cp2af_sRxPort.c0.mmioWrValid) begin
             case (mmio_req_hdr.address)
-            MMIO_CMD_ARG0: begin
-                cmd_args[0] <= 64'(cp2af_sRxPort.c0.data);
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_ARG0: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            MMIO_CMD_ARG1: begin
-                cmd_args[1] <= 64'(cp2af_sRxPort.c0.data);
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_ARG1: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            MMIO_CMD_ARG2: begin
-                cmd_args[2] <= 64'(cp2af_sRxPort.c0.data);
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_ARG2: data=%0d\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            MMIO_CMD_TYPE: begin
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_CMD_TYPE: data=%0d\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
             `ifdef SCOPE
             MMIO_SCOPE_WRITE: begin
             `ifdef DBG_TRACE_AFU
@@ -384,7 +366,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     reg  vx_reset = 1; // asserted at initialization
     wire vx_busy;
 
-    wire is_mmio_wr_cmd = cp2af_sRxPort.c0.mmioWrValid && (MMIO_CMD_TYPE == mmio_req_hdr.address);
+    // wire is_mmio_wr_cmd = cp2af_sRxPort.c0.mmioWrValid && (MMIO_CMD_TYPE == mmio_req_hdr.address);
+    wire is_mmio_wr_cmd = 0;
     wire [CMD_TYPE_WIDTH-1:0] cmd_type = is_mmio_wr_cmd ? CMD_TYPE_WIDTH'(cp2af_sRxPort.c0.data) : CMD_TYPE_WIDTH'(CMD_IDLE);
 
     always @(posedge clk) begin

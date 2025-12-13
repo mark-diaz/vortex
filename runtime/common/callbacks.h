@@ -56,7 +56,10 @@ typedef struct {
 
   // Start device execution
   int (*start) (vx_device_h hdevice, vx_buffer_h hkernel, vx_buffer_h harguments);
-
+  
+  // flush command buffer
+  int (*flush) (vx_device_h hdevice);
+  
   // Wait for device ready with milliseconds timeout
   int (*ready_wait) (vx_device_h hdevice, uint64_t timeout);
 
@@ -68,7 +71,7 @@ typedef struct {
 
   // query device performance counter
   int (*mpm_query) (vx_device_h hdevice, uint32_t addr, uint32_t core_id, uint64_t* value);
-
+  
 } callbacks_t;
 
 int vx_dev_init(callbacks_t* callbacks);

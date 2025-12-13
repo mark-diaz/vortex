@@ -332,6 +332,11 @@ public:
     return 0;
   }
 
+  // command buffer not implemented on simx
+  int flush() {
+    return -1;
+  }
+
   int ready_wait(uint64_t timeout) {
     if (!future_.valid())
       return 0;

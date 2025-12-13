@@ -179,6 +179,14 @@ extern int vx_dev_init(callbacks_t* callbacks) {
     return device->start(kernel->addr, arguments->addr);
   };
 
+  callbacks->flush = [](vx_device_h hdevice) {
+    if (nullptr == hdevice)
+      return  -1;
+    DBGPRINT("FLUSH: hdevice=%p \n", hdevice);
+    auto device = ((vx_device*)hdevice);
+    return device->flush();
+  };
+
   callbacks->ready_wait = [](vx_device_h hdevice, uint64_t timeout) {
     if (nullptr == hdevice)
       return -1;

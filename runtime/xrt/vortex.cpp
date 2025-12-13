@@ -562,6 +562,11 @@ public:
     return 0;
   }
 
+  // command buffer not implemented on xrt
+  int flush() {
+    return -1;
+  }
+
   int ready_wait(uint64_t timeout) {
     struct timespec sleep_time;
   #ifndef NDEBUG
