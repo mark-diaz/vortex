@@ -133,7 +133,7 @@ int main() {
   std::cout << "upload source buffer0" << std::endl;
   RT_CHECK(vx_copy_to_dev(src0_buffer, h_src0.data(), 0, buf_size));
   RT_CHECK(vx_copy_to_dev(src1_buffer, h_src1.data(), 0, buf_size));
-
+  vx_flush_commands(device);
     
   // Upload kernel binary
   std::cout << "Upload kernel binary" << std::endl;
@@ -142,7 +142,7 @@ int main() {
   // upload kernel argument
   std::cout << "upload kernel argument" << std::endl;
   RT_CHECK(vx_upload_bytes(device, &kernel_arg, sizeof(kernel_arg_t), &args_buffer));
-
+  vx_flush_commands(device);
 
 
   // std::cout << "start device" << std::endl;
@@ -156,8 +156,8 @@ int main() {
   // RT_CHECK(vx_copy_from_dev(h_dst.data(), dst_buffer, 0, buf_size));
 
 
-  std::cout << "flush commands" << std::endl;
-  vx_flush_commands(device);
+  // std::cout << "flush commands" << std::endl;
+  // vx_flush_commands(device);
   
 
 

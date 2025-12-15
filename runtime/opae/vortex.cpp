@@ -112,8 +112,22 @@ public:
     , size_(0)
     , num_commands_(0)
     , num_cache_blocks_(0)
+    , num_cmds_this_flush_(0)
+    , num_cache_blocks_this_flush_(0)
   {}
 
+  bool is_curr_cache_block_filled() {
+    return curr_offset_ == 0;
+  }
+
+  void pad_cache_block() {
+    size_t pad = cache_block_size_ - curr_offset_;
+    write_bytes(nullptr, pad);  // zero pad
+    num_cache_blocks_++;
+    num_cache_blocks_this_flush_++;
+    curr_offset_ = 0;
+  }
+ 
   bool push_command(uint32_t cmd_type, const void* payload, size_t payload_size) {
     CmdHeader hdr = { cmd_type };
     size_t total = sizeof(CmdHeader) + payload_size;
@@ -136,6 +150,7 @@ public:
       
 
       num_cache_blocks_++;  // Count completed cache block
+      num_cache_blocks_this_flush_++;
     }
 
     if (!write_bytes(&hdr, sizeof(CmdHeader)))
@@ -146,6 +161,7 @@ public:
 
     curr_offset_ += total;
     num_commands_++;  // Count command
+    num_cmds_this_flush_++;
     return true;
   }
 
@@ -164,6 +180,20 @@ public:
     }
     return num_cache_blocks_;
   }
+
+  size_t get_num_cmds_this_flush() const {
+    return num_cmds_this_flush_;
+  }
+  size_t get_num_cache_blocks_this_flush() const {
+    return num_cache_blocks_this_flush_;
+  }
+  void set_num_cmds_this_flush(size_t n) {
+    num_cmds_this_flush_ = n;
+  }
+  void set_num_cache_blocks_this_flush(size_t n) {
+    num_cache_blocks_this_flush_ = n;
+  }
+
 
   uint8_t* data() {
     return base_addr_;
@@ -199,6 +229,8 @@ private:
   size_t size_;
   size_t num_commands_;
   size_t num_cache_blocks_;
+  size_t num_cmds_this_flush_;
+  size_t num_cache_blocks_this_flush_;
 };
 
 class vx_device {
@@ -690,6 +722,8 @@ public:
     if (!enqueue_command(CMD_MEM_READ, payload, sizeof(payload)))
       return -1;
 
+    flush_commands();
+
     // Wait for the read operation to finish
     fprintf(stdout, "[COMMAND BUFFER SW download] Before ready_wait\n");
     if (this->ready_wait(VX_MAX_TIMEOUT) != 0)
@@ -839,9 +873,14 @@ public:
 
   int flush_commands() {
     std::cout << "[COMMAND BUFFER SW] Flushing command buffer..." << std::endl;
+    if (!cmd_buffer_.is_curr_cache_block_filled()) {
+      cmd_buffer_.pad_cache_block();
+    }
     size_t bytes_written = cmd_buffer_.used_space();
-    size_t num_cmds = cmd_buffer_.num_commands();
-    size_t num_blocks = cmd_buffer_.num_cache_blocks();
+    // size_t num_cmds = cmd_buffer_.num_commands();
+    // size_t num_blocks = cmd_buffer_.num_cache_blocks();
+    size_t num_cmds = cmd_buffer_.get_num_cmds_this_flush();
+    size_t num_blocks = cmd_buffer_.get_num_cache_blocks_this_flush();
     std::cout << "[COMMAND BUFFER SW] Number of commands: " << num_cmds << std::endl;
     std::cout << "[COMMAND BUFFER SW] Number of 64-byte cache blocks: " << num_blocks << std::endl;
     std::cout << "[COMMAND BUFFER SW] Total bytes written: " << bytes_written << " bytes" << std::endl;
@@ -852,6 +891,8 @@ public:
     std::cout << "[COMMAND BUFFER SW] Writing MMIO_FLUSH: 0x" << std::hex << flush_value << std::dec << " [NUM_BLOCKS=" << num_blocks << ", NUM_CMDS=" << num_cmds << "]" << std::endl;
     CHECK_FPGA_ERR(api_.fpgaWriteMMIO64(fpga_, 0, MMIO_FLUSH, flush_value), { return -1; });
     std::cout << "[COMMAND BUFFER SW] Finish writing to MMIO_FLUSH " << std::endl;
+    cmd_buffer_.set_num_cmds_this_flush(0);
+    cmd_buffer_.set_num_cache_blocks_this_flush(0);
     return 0;
   }
 

@@ -25,6 +25,7 @@ int get_profiling_mode();
 static int dcr_initialize(vx_device_h hdevice) {
   const uint64_t startup_addr(STARTUP_ADDR);
 
+  std::cout << "HII ZZN" << std::endl;
   CHECK_ERR(vx_dcr_write(hdevice, VX_DCR_BASE_STARTUP_ADDR0, startup_addr & 0xffffffff), {
     return err;
   });
