@@ -124,6 +124,17 @@ public:
       if (!write_bytes(nullptr, pad))  // zero pad
         return false;
       curr_offset_ = 0;
+
+      // Print completed cache block before padding
+      size_t block_start = (num_cache_blocks_) * cache_block_size_;
+      fprintf(stdout, "[COMMAND BUFFER SW] Completed Ring Buffer Cache block %zu (bytes %zu-%zu):\n  ", 
+              num_cache_blocks_, block_start, block_start + cache_block_size_ - 1);
+      for (size_t i = 0; i < cache_block_size_; i++) {
+        fprintf(stdout, "%02x", base_addr_[block_start + i]);
+      }
+      fprintf(stdout, "\n");
+      
+
       num_cache_blocks_++;  // Count completed cache block
     }
 

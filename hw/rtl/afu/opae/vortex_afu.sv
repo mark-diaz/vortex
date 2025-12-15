@@ -196,14 +196,31 @@ end
 assign flush_fifo_push_out = (ff_state == PUSH_STATE);
 assign flush_fifo_push_entry_out = (ff_state == PUSH_STATE) ? flush_entry_ff   : 64'b0;
 
+
+// DEBUG
+function string ff_state_name(input [1:0] state);
+    case (state)
+        I:          return "IDLE";
+        PUSH_STATE: return "PUSH_STATE";
+        default:    return "UNKNOWN";
+    endcase
+endfunction
+
+always@(posedge clk) begin
+    if (ff_state != ff_state_next) begin
+        `TRACE(2, ("%t: [flush_fifo_read_fsm] ff_state=%s, ff_state_next=%s\n", $time, ff_state_name(ff_state), ff_state_name(ff_state_next)))
+    end
+end
+
 endmodule
 
 
 module cmd_fifo_control_fsm #(
     FLUSH_ENTRY_WIDTH = 64,
-    MAX_NUM_CMDS = 64,
-    MAX_BLOCKS = 16,
+    // MAX_NUM_CMDS = 64,  // Unused for now
+    // MAX_BLOCKS = 16,    // Unused for now
     CL_BLOCK_SIZE = 512,
+    NUM_BLOCKS_NUM_CMDS_WIDTH = 32,
     RB_INDEX_WIDTH = 10 // MAX 1024 RB entries
 ) (
     input  logic         clk,
@@ -219,17 +236,22 @@ module cmd_fifo_control_fsm #(
     output logic[RB_INDEX_WIDTH-1:0]   ring_buffer_index_out, 
     output logic         flush_fifo_pop_out,
     output logic         ring_buffer_read_req_valid_out,
-    output logic         ring_buffer_read_pending_out
+    output logic         ring_buffer_read_pending_out,
+    output logic[CL_BLOCK_SIZE-1:0] ring_buffer_read_data_out
 
 );
 
 reg[2:0] s, ns;
-reg[$clog2(MAX_NUM_CMDS+1)-1:0] total_cmd_count;
-reg[$clog2(MAX_BLOCKS+1)-1:0] total_block_count, fetched_block_count;
+reg[NUM_BLOCKS_NUM_CMDS_WIDTH-1:0] total_cmd_count;
+reg[NUM_BLOCKS_NUM_CMDS_WIDTH-1:0] total_block_count, fetched_block_count;
+
+`UNUSED_VAR (total_cmd_count);
 reg[FLUSH_ENTRY_WIDTH-1:0] flush_entry;
 reg[RB_INDEX_WIDTH-1:0] rb_index;
 reg[CL_BLOCK_SIZE-1:0] ring_buffer_read_data;
 
+`UNUSED_VAR (flush_entry);
+assign ring_buffer_read_data_out = ring_buffer_read_data;
 
 reg flush_fifo_pop, ring_buffer_read_req_valid, ring_buffer_read_pending;
 
@@ -239,11 +261,12 @@ assign ring_buffer_read_pending_out = ring_buffer_read_pending;
 assign ring_buffer_index_out = rb_index;
 
 
-localparam IDLE=0, FETCH_RB_BLOCK=1, FETCH_RB_PENDING=2, RB_HANDLE_RESPONSE=3, FLUSH_FIFO_POP_STATE=4, WAIT_CMD_FIFO_NOT_FULL=5;
+localparam IDLE=0, FETCH_RB_BLOCK=1, FETCH_RB_PENDING=2, RB_HANDLE_RESPONSE=3, FLUSH_FIFO_POP_STATE=4;
+// localparam WAIT_CMD_FIFO_NOT_FULL=5; // Unused for now
 
 always @(posedge clk) begin
     if (reset) begin
-        s <= IDLE;
+        s <= 3'b000;
     end else begin
         s <= ns;
     end
@@ -264,7 +287,7 @@ always@(*) begin
             ns = FETCH_RB_BLOCK;
         end
         FETCH_RB_BLOCK : begin
-            if (!cmd_fifo_full) begin
+            if (ring_buffer_read_fire) begin
                 ns = FETCH_RB_PENDING;
             end else begin
                 ns = FETCH_RB_BLOCK;
@@ -281,9 +304,9 @@ always@(*) begin
             if (cmd_fifo_full) begin
                 ns = RB_HANDLE_RESPONSE;
             end
-            else if (fetched_block_count == total_block_count-1 && !cmd_fifo_full) begin
+            else if (fetched_block_count == total_block_count && !cmd_fifo_full) begin
                 ns = IDLE;
-            end else if (fetched_block_count != total_block_count-1 && !cmd_fifo_full) begin
+            end else if (fetched_block_count != total_block_count && !cmd_fifo_full) begin
                 ns = FETCH_RB_BLOCK;
             end
             else begin
@@ -311,9 +334,15 @@ end
 always@(posedge clk) begin
     if (reset) begin
         cmd_fifo_push <= 1'b0;
-        ring_buffer_index_out <= 8'b0;
         rb_index <= 0;
-    end
+        ring_buffer_read_pending <= 0;
+        fetched_block_count <= 0;
+        ring_buffer_read_req_valid <= 0;
+
+        flush_fifo_pop <= 1'b0;
+        total_block_count <= 0;
+        total_cmd_count <= 0;
+    end 
     else begin
         case(s) 
             IDLE : begin
@@ -338,7 +367,7 @@ always@(posedge clk) begin
             FETCH_RB_BLOCK : begin
                 cmd_fifo_push <= 0;
                 ring_buffer_read_req_valid <= 1'b1;
-                if (ring_buffer_read_fire) begin
+                if (ring_buffer_read_fire ) begin
                     ring_buffer_read_req_valid <= 1'b0;
                     ring_buffer_read_pending <= 1;
                 end
@@ -367,11 +396,468 @@ end
 
 
 
+// DEBUG
+function string cmd_fsm_state_name(input [2:0] state);
+    case (state)
+        IDLE:               return "IDLE";
+        FETCH_RB_BLOCK:     return "FETCH_RB_BLOCK";
+        FETCH_RB_PENDING:   return "FETCH_RB_PENDING";
+        RB_HANDLE_RESPONSE: return "RB_HANDLE_RESPONSE";
+        FLUSH_FIFO_POP_STATE: return "FLUSH_FIFO_POP_STATE";
+        default:            return "UNKNOWN";
+    endcase
+endfunction
+
+always@(posedge clk) begin
+    if (ns != s) begin
+        `TRACE(2, ("%t: [cmd_fifo_control_fsm] s=%s, ns=%s\n", $time, cmd_fsm_state_name(s), cmd_fsm_state_name(ns)))
+    end
+
+    if (s == FETCH_RB_PENDING && ring_buffer_rsp_fire) begin
+        `TRACE(2, ("%t: [cmd_fifo_control_fsm] ring_buffer_read_data=0x%h\n", $time, ring_buffer_data_in))
+    end
+
+    if (s == FETCH_RB_BLOCK && ring_buffer_read_fire) begin
+        `TRACE(2, ("%t: [cmd_fifo_control_fsm] Issued RB read for rb_index=%0d\n", $time, rb_index))
+    end
+end
+
+endmodule
+
+
+module cmd_unpack_fsm #(
+    CL_BLOCK_SIZE = 512,
+    CMD_TYPE_WIDTH = 32,
+    CMD_ARG0_WIDTH = 64,
+    CMD_ARG1_WIDTH = 64,
+    CMD_ARG2_WIDTH = 64,
+    // MAX_CMDS_IN_BLOCK = 16,  // Unused for now
+    CMD_MEM_READ = `AFU_IMAGE_CMD_MEM_READ,
+    CMD_MEM_WRITE = `AFU_IMAGE_CMD_MEM_WRITE,
+    CMD_RUN = `AFU_IMAGE_CMD_RUN,
+    CMD_DCR_WRITE = `AFU_IMAGE_CMD_DCR_WRITE
+) (
+    input logic clk,
+    input logic reset,
+    input logic[CL_BLOCK_SIZE-1:0] ring_buffer_cache_block_in,
+    input logic single_cmd_fifo_full_in,
+    input logic cmd_fifo_empty_in,
+
+    output logic cmd_fifo_pop_out,
+    output logic single_cmd_fifo_push_out,
+    output logic single_cmd_valid_out,
+    output logic[CMD_TYPE_WIDTH-1:0] cmd_type_out,
+    output logic[CMD_ARG0_WIDTH-1:0] cmd_arg0_out,
+    output logic[CMD_ARG1_WIDTH-1:0] cmd_arg1_out,
+    output logic[CMD_ARG2_WIDTH-1:0] cmd_arg2_out
+);
+
+    reg[1:0] s, ns;
+    reg[10:0] offset;  // 11 bits to handle values up to 2048 (prevents wrap-around)
+    localparam I=0, UNPACK=1, WAIT=2, DONE=3;
+    wire[CMD_TYPE_WIDTH-1:0] cmd_type;
+    reg[CMD_TYPE_WIDTH-1:0] cmd_type_reg;
+    
+    // Combinational extraction of cmd_type from current offset (only valid when offset < CL_BLOCK_SIZE)
+    /* verilator lint_off WIDTHTRUNC */
+    assign cmd_type = (offset < CL_BLOCK_SIZE) ? ring_buffer_cache_block_reg[offset[8:0] +: CMD_TYPE_WIDTH] : '0;
+    /* verilator lint_on WIDTHTRUNC */
+
+    reg single_cmd_output_valid, cmd_fifo_pop, single_cmd_fifo_push;
+    assign single_cmd_valid_out = single_cmd_output_valid;
+    assign cmd_fifo_pop_out = cmd_fifo_pop;
+    assign cmd_type_out = cmd_type_reg;
+    assign single_cmd_fifo_push_out = single_cmd_fifo_push;
+
+    reg[CMD_ARG0_WIDTH-1:0] cmd_arg0_reg;
+    reg[CMD_ARG1_WIDTH-1:0] cmd_arg1_reg;
+    reg[CMD_ARG2_WIDTH-1:0] cmd_arg2_reg;
+    assign cmd_arg0_out = cmd_arg0_reg;
+    assign cmd_arg1_out = cmd_arg1_reg;
+    assign cmd_arg2_out = cmd_arg2_reg;
+
+    reg[CL_BLOCK_SIZE-1:0] ring_buffer_cache_block_reg;  // Register to hold captured FIFO data
+
+    always @(posedge clk) begin
+        if (reset) begin
+            s <= 2'b00;
+        end else begin
+            s <= ns;
+        end
+    end
+
+    always@(*) begin
+        case(s) 
+            I : begin
+                if (!cmd_fifo_empty_in) begin
+                    ns = UNPACK;
+                end else begin
+                    ns = I;
+                end
+            end
+            UNPACK : begin
+                if (single_cmd_fifo_full_in) begin
+                    ns = WAIT;
+                end else if (offset >= (CL_BLOCK_SIZE - CMD_TYPE_WIDTH) || (cmd_type != CMD_MEM_READ && cmd_type != CMD_MEM_WRITE && cmd_type != CMD_RUN && cmd_type != CMD_DCR_WRITE ) ) begin
+                    // Exit when offset is too close to end of block or invalid cmd_type
+                    ns = DONE;
+                end else begin
+                    ns = UNPACK;
+                end
+            end
+            WAIT : begin
+                if (!single_cmd_fifo_full_in) begin
+                    ns = UNPACK;
+                end
+                else begin
+                    ns = WAIT;
+                end
+            end
+            DONE : begin
+                ns = I;
+            end
+            default : begin
+                ns = I;
+            end
+        endcase
+    end
+
+
+    always@(posedge clk) begin
+        if (reset) begin
+            offset <= 0;
+            single_cmd_output_valid <= 0;
+            cmd_fifo_pop <= 0;
+            single_cmd_fifo_push <= 0;
+            ring_buffer_cache_block_reg <= 0;
+            cmd_type_reg <= 0;
+            cmd_arg0_reg <= 0;
+            cmd_arg1_reg <= 0;
+            cmd_arg2_reg <= 0;
+        end
+        else begin
+            case(s) 
+                I : begin
+                    cmd_fifo_pop <= 1'b0;
+                    single_cmd_output_valid <= 1'b0;
+                    single_cmd_fifo_push <= 1'b0;
+                    if (!cmd_fifo_empty_in) begin
+                        cmd_fifo_pop <= 1'b1;  // Pop to get next cache block
+                         ring_buffer_cache_block_reg <= ring_buffer_cache_block_in;
+                        offset <= 0;
+                    end
+                end
+
+                UNPACK : begin
+                    cmd_fifo_pop <= 1'b0;
+                    if (!single_cmd_fifo_full_in) begin
+                        cmd_type_reg <= cmd_type;
+                        /* verilator lint_off WIDTHTRUNC */
+                        case (cmd_type) 
+                            CMD_MEM_READ, CMD_MEM_WRITE : begin
+                                cmd_arg0_reg <= ring_buffer_cache_block_reg[offset[8:0] + CMD_TYPE_WIDTH +: CMD_ARG0_WIDTH];
+                                cmd_arg1_reg <= ring_buffer_cache_block_reg[offset[8:0] + CMD_TYPE_WIDTH + CMD_ARG0_WIDTH +: CMD_ARG1_WIDTH];
+                                cmd_arg2_reg <= ring_buffer_cache_block_reg[offset[8:0] + CMD_TYPE_WIDTH + CMD_ARG0_WIDTH + CMD_ARG1_WIDTH +: CMD_ARG2_WIDTH];
+                                offset <= offset + CMD_TYPE_WIDTH + CMD_ARG0_WIDTH + CMD_ARG1_WIDTH + CMD_ARG2_WIDTH;
+                                single_cmd_fifo_push <= 1;
+                                single_cmd_output_valid <= 1'b1;
+                            end
+
+                            CMD_DCR_WRITE : begin
+                                cmd_arg0_reg <= ring_buffer_cache_block_reg[offset[8:0] + CMD_TYPE_WIDTH +: CMD_ARG0_WIDTH];
+                                cmd_arg1_reg <= ring_buffer_cache_block_reg[offset[8:0] + CMD_TYPE_WIDTH + CMD_ARG0_WIDTH +: CMD_ARG1_WIDTH];
+                                cmd_arg2_reg <= 0;
+                                offset <= offset + CMD_TYPE_WIDTH + CMD_ARG0_WIDTH + CMD_ARG1_WIDTH;
+                                single_cmd_fifo_push <= 1;
+                                single_cmd_output_valid <= 1'b1;
+                            end
+
+                            CMD_RUN : begin
+                                cmd_arg0_reg <= ring_buffer_cache_block_reg[offset[8:0] + CMD_TYPE_WIDTH +: CMD_ARG0_WIDTH];
+                                cmd_arg1_reg <= 0;
+                                cmd_arg2_reg <= 0;
+                                offset <= offset + CMD_TYPE_WIDTH + CMD_ARG0_WIDTH;
+                                single_cmd_fifo_push <= 1;
+                                single_cmd_output_valid <= 1'b1;
+                            end
+
+                            default : begin
+                                single_cmd_fifo_push <= 0;
+                                single_cmd_output_valid <= 1'b0;
+                            end
+
+                        endcase
+                        /* verilator lint_on WIDTHTRUNC */
+
+                    end
+
+                end
+
+                DONE : begin
+                    single_cmd_output_valid <= 1'b0;
+                    single_cmd_fifo_push <= 1'b0;
+                    cmd_fifo_pop <= 1'b0;  // Don't pop here, pop happens in I state
+                end
+
+            endcase
+        end
+    end
     
 endmodule
 
 
+/* verilator lint_off UNUSEDPARAM */
+module single_cmd_dispatch_fsm #(
+    CL_BLOCK_SIZE = 512,
+    CMD_TYPE_WIDTH = 32,
+    CMD_ARG0_WIDTH = 64,
+    CMD_ARG1_WIDTH = 64,
+    CMD_ARG2_WIDTH = 64,
+    CMD_MEM_READ = `AFU_IMAGE_CMD_MEM_READ,
+    CMD_MEM_WRITE = `AFU_IMAGE_CMD_MEM_WRITE,
+    CMD_RUN = `AFU_IMAGE_CMD_RUN,
+    CMD_DCR_WRITE = `AFU_IMAGE_CMD_DCR_WRITE,
+    STATE_IDLE         = 0,
+    STATE_MEM_WRITE    = 1,
+    STATE_MEM_READ     = 2,
+    STATE_RUN          = 3,
+    STATE_DCR_WRITE    = 4,
+    STATE_WIDTH = 4
+) (
+    input logic clk,
+    input logic reset,
+    input logic single_cmd_fifo_empty_in,
+    input logic[CMD_TYPE_WIDTH-1:0] single_cmd_type_in,
+    input logic[CMD_ARG0_WIDTH-1:0] single_cmd_arg0_in,
+    input logic[CMD_ARG1_WIDTH-1:0] single_cmd_arg1_in,
+    input logic[CMD_ARG2_WIDTH-1:0] single_cmd_arg2_in,
+    input logic[STATE_WIDTH-1:0] state, // MIGHT NOT NEED THIS
+    input logic cmd_done,
 
+    output logic single_cmd_fifo_pop_out,
+    output logic single_cmd_valid_out,
+    output logic[CMD_TYPE_WIDTH-1:0] single_cmd_type_out,
+    output logic[CMD_ARG0_WIDTH-1:0] single_cmd_arg0_out,
+    output logic[CMD_ARG1_WIDTH-1:0] single_cmd_arg1_out,
+    output logic[CMD_ARG2_WIDTH-1:0] single_cmd_arg2_out,
+    output logic[9:0] num_cmds_finished_out  // Might need to change width
+);
+
+    reg[1:0] s, ns;
+    localparam I=0, POP_ARGS=1, WAIT=2, DONE=3;
+    reg[CMD_TYPE_WIDTH-1:0] cmd_type_reg;
+    reg[CMD_ARG0_WIDTH-1:0] cmd_arg0_reg;
+    reg[CMD_ARG1_WIDTH-1:0] cmd_arg1_reg;
+    reg[CMD_ARG2_WIDTH-1:0] cmd_arg2_reg;
+
+    reg single_cmd_output_valid, single_cmd_fifo_pop;
+    assign single_cmd_valid_out = single_cmd_output_valid;
+    assign single_cmd_fifo_pop_out = single_cmd_fifo_pop;
+    assign single_cmd_type_out = cmd_type_reg;
+    assign single_cmd_arg0_out = cmd_arg0_reg;
+    assign single_cmd_arg1_out = cmd_arg1_reg;
+    assign single_cmd_arg2_out = cmd_arg2_reg;
+
+    reg [9:0] num_cmds_finished; // Might need to change width
+    assign num_cmds_finished_out = num_cmds_finished;
+
+    always@ (posedge clk) begin
+        if (reset) begin
+            s <= 2'b00;
+        end else begin
+            s <= ns;
+        end
+    end
+
+    always@(*) begin
+        case(s) 
+            I : begin
+              if (state == STATE_IDLE && !single_cmd_fifo_empty_in) begin
+                  ns = POP_ARGS;
+              end else begin
+                  ns = I;
+              end
+            end
+            POP_ARGS : begin
+                ns = WAIT;
+            end
+            WAIT : begin
+                if (cmd_done) begin
+                    ns = DONE;
+                end else begin
+                    ns = WAIT;
+                end
+            end
+            DONE : begin
+                if (!single_cmd_fifo_empty_in) begin
+                    ns = POP_ARGS;
+                end else begin
+                    ns = DONE;
+                end
+            end
+            default : begin
+                ns = I;
+            end
+        endcase
+    end
+    
+    always@(posedge clk) begin
+        if (reset) begin
+            num_cmds_finished <= 0;
+            single_cmd_fifo_pop <= 0;
+            single_cmd_output_valid <= 0;
+            cmd_type_reg <= 0;
+            cmd_arg0_reg <= 0;
+            cmd_arg1_reg <= 0;
+            cmd_arg2_reg <= 0;
+        end
+        else begin
+            case(s) 
+                I : begin
+                    num_cmds_finished <= 0;
+                    if (state== STATE_IDLE && !single_cmd_fifo_empty_in) begin
+                        single_cmd_fifo_pop <= 1'b1;  // Pop to get next command
+                    end else begin
+                        single_cmd_fifo_pop <= 1'b0;
+                    end
+                end
+
+                POP_ARGS : begin
+                    single_cmd_fifo_pop <= 1'b0;
+                    cmd_type_reg <= single_cmd_type_in;
+                    cmd_arg0_reg <= single_cmd_arg0_in;
+                    cmd_arg1_reg <= single_cmd_arg1_in;
+                    cmd_arg2_reg <= single_cmd_arg2_in;
+                    single_cmd_output_valid <= 1'b1;
+                end
+
+                WAIT : begin
+                    if (cmd_done) begin
+                        single_cmd_output_valid <= 0;
+                    end
+                end
+                DONE : begin
+                    if (!single_cmd_fifo_empty_in) begin
+                        single_cmd_fifo_pop <= 1'b1;  // Pop to get next command
+                        num_cmds_finished <= num_cmds_finished + 1;
+                    end else begin
+                        single_cmd_fifo_pop <= 1'b0;
+                    end
+                end
+            endcase
+        end
+    end
+
+    // DEBUG 
+    always @(posedge clk) begin
+        if (s == DONE && !single_cmd_fifo_empty_in) begin
+            `TRACE(2, ("%t: [single_cmd_dispatch_fsm] num_cmds_finished=%0d , single_cmd_fifo_empty=%0d ,\n", $time, num_cmds_finished, single_cmd_fifo_empty_in))
+        end
+
+        if (s == POP_ARGS) begin
+            `TRACE(2, ("%t: [single_cmd_dispatch_fsm] Dispatched cmd_type=0x%h, arg0=0x%h, arg1=0x%h, arg2=0x%h\n", $time, single_cmd_type_in, single_cmd_arg0_in, single_cmd_arg1_in, single_cmd_arg2_in))
+        end
+    end
+    
+endmodule
+/* verilator lint_on UNUSEDPARAM */
+
+
+module mmio_status_fsm #(
+    NUM_CMDS_WIDTH=10,
+    MMIO_FLUSH_ENTRY_WIDTH=64
+) (
+    input logic clk,
+    input logic reset,
+    input logic[NUM_CMDS_WIDTH-1:0] num_finished_cmds_in,
+    /* verilator lint_off UNUSEDSIGNAL */
+    input logic[MMIO_FLUSH_ENTRY_WIDTH-1:0] mmio_flush_entry,
+    /* verilator lint_on UNUSEDSIGNAL */
+    input logic flush,
+
+    output logic is_mmio_status_done
+);
+
+    reg[1:0] s, ns;
+    /* verilator lint_off WIDTHTRUNC */
+    wire[NUM_CMDS_WIDTH-1:0] num_cmds_to_run_in_this_flush;
+    assign num_cmds_to_run_in_this_flush = mmio_flush_entry[31:0];
+    /* verilator lint_on WIDTHTRUNC */
+    reg[NUM_CMDS_WIDTH-1:0] total_cmds_to_run;
+    localparam I=0, FLUSH_DETECTED=1, WAIT=2, DONE=3;
+
+    assign is_mmio_status_done = (s == DONE);
+
+
+    always @(posedge clk) begin
+        if (reset) begin
+            s <= 2'b00;
+        end else begin
+            s <= ns;
+        end
+    end
+
+    always@(*) begin
+        case(s) 
+            I : begin
+                if (flush) begin
+                    ns = FLUSH_DETECTED;
+                end else begin
+                    ns = I;
+                end
+            end
+            FLUSH_DETECTED : begin
+                if (!flush) begin
+                    ns = WAIT;
+                end else begin
+                    ns = FLUSH_DETECTED;
+                end
+            end
+            WAIT : begin
+                if (flush) begin
+                    ns = FLUSH_DETECTED;
+                end else if (!flush && num_finished_cmds_in == total_cmds_to_run) begin
+                    ns = DONE;
+                end else begin
+                    ns = WAIT;
+                end
+            end
+            DONE : begin
+                ns = DONE;
+            end
+            default : begin
+                ns = I;
+            end
+        endcase
+    end
+
+    always@(posedge clk) begin
+        if (reset) begin
+            total_cmds_to_run <= 0;
+        end
+        else begin
+            case(s) 
+                I : begin
+                    total_cmds_to_run <= 0;
+                end
+
+                FLUSH_DETECTED : begin
+                    total_cmds_to_run <= total_cmds_to_run + num_cmds_to_run_in_this_flush;
+                end
+
+                WAIT : begin
+                    // DO NOTHING
+                end
+
+                DONE : begin
+                    // DO NOTHING
+                end
+
+            endcase
+        end
+    end
+    
+endmodule
 
 
 module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_gpu_pkg::*; #(
@@ -474,6 +960,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam CMD_ARG0_WIDTH = 8*8; // Zuoning
     localparam CMD_ARG1_WIDTH = 8*8; // Zuoning
     localparam CMD_ARG2_WIDTH = 8*8; // Zuoning
+    localparam CL_BLOCK_SIZE = 512; // Zuoning
     /* verilator lint_on UNUSEDPARAM */
 
     wire [127:0] afu_id = `AFU_ACCEL_UUID;
@@ -493,7 +980,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // ZUONING 
     reg [STATE_WIDTH-1:0] state;
-    reg [MAX_RING_BUFFER_CMDS_WIDTH-1:0] ring_buffer_num_cmds_remaining, ring_buffer_num_cmds_consumed, rb_index;
+    reg [MAX_RING_BUFFER_CMDS_WIDTH-1:0] ring_buffer_num_cmds_remaining, ring_buffer_num_cmds_consumed;
+    wire [MAX_RING_BUFFER_CMDS_WIDTH-1:0] rb_index;
 
     /* verilator lint_off UNUSEDSIGNAL */
     wire [CMD_HEADER_WIDTH-1:0] cmd_header;
@@ -521,6 +1009,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     reg [2:0][63:0] mmio_cmd_args;  // For MMIO writes (non-blocking)
     `UNUSED_VAR (mmio_cmd_args)
     wire [2:0][63:0] fifo_cmd_args; // For FIFO output (continuous assign)
+    `UNUSED_VAR (fifo_cmd_args)
     wire [2:0][63:0] cmd_args;      // Muxed output (assigned later)
 
     reg[63:0] mmio_flush_entry; // [NUM_BLOCKS, NUM_BLOCKS]
@@ -549,12 +1038,13 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam RB_PTR_WIDTH = `CLOG2(RB_DEPTH);
     reg[RB_PTR_WIDTH-1:0] ring_buffer_wptr;
     reg[RB_PTR_WIDTH-1:0] ring_buffer_rptr;
+    `UNUSED_VAR (ring_buffer_wptr);
     reg [63:0] host_ring_buffer_base_addr ;
 
     // Ring buffer read control
     reg ring_buffer_read_req_valid;
     wire ring_buffer_read_req_ready;
-    reg ring_buffer_read_pending; // Track outstanding read
+    wire ring_buffer_read_pending; // Track outstanding read
     reg [CCI_DATA_WIDTH-1:0] ring_buffer_read_data;
     reg ring_buffer_read_data_valid;
     
@@ -861,11 +1351,13 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // wire use_fifo_cmd = non_empty_cmd_fifo & ring_buffer_empty_start_popping_kernel_fifo & flush & (state == STATE_IDLE);
     // `UNUSED_VAR(use_fifo_cmd);
     wire [CMD_TYPE_WIDTH-1:0] fifo_cmd_type = CMD_TYPE_WIDTH'(cmd_header[CMD_TYPE_WIDTH-1:0]);
+    `UNUSED_VAR (fifo_cmd_type)
     
     wire use_fifo_cmd = non_empty_cmd_fifo & 
     ring_buffer_empty_start_popping_kernel_fifo & flush & (state == STATE_IDLE);
     `UNUSED_VAR(use_fifo_cmd);
-    wire [CMD_TYPE_WIDTH-1:0] cmd_type = use_unpacked ? fifo_cmd_type : CMD_TYPE_WIDTH'(CMD_IDLE);
+    
+    wire [CMD_TYPE_WIDTH-1:0] cmd_type = single_cmd_valid_dispatched ? CMD_TYPE_WIDTH'(cmd_header_single_cmd_dispatched[CMD_TYPE_WIDTH-1:0]) : CMD_TYPE_WIDTH'(CMD_IDLE);
     
     wire ring_buffer_empty_start_popping_kernel_fifo = ring_buffer_num_cmds_remaining == 0;
 
@@ -1160,9 +1652,26 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     reg       line_active;
     // wire cmd_fifo_push = ring_buffer_read_data_valid;
     wire line_done = (unpack_cmd_count != 0) && !line_active;
-    wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10) & (line_done | (unpack_cmd_count == 0)  ) & flush;
+    `UNUSED_VAR (line_done);
+    // wire cmd_fifo_pop = ring_buffer_empty_start_popping_kernel_fifo & non_empty_cmd_fifo & (state == STATE_IDLE) & (pop_cntr == 2'b10) & (line_done | (unpack_cmd_count == 0)  ) & flush;
+    wire cmd_fifo_pop;
+    // assign cmd_fifo_pop = 1'b0; // TODO: connect when command FIFO consumer is implemented
 
-    wire all_done = !line_active & cmd_fifo_empty & ring_buffer_empty_start_popping_kernel_fifo & (ring_buffer_num_cmds_consumed != 0) & flush;
+    // wire all_done = !line_active & cmd_fifo_empty & ring_buffer_empty_start_popping_kernel_fifo & (ring_buffer_num_cmds_consumed != 0) & flush;
+
+    wire all_done;
+    mmio_status_fsm MMIO_STATUS_FSM (
+        .clk                  (clk),
+        .reset                (reset),
+
+        .num_finished_cmds_in (num_cmds_finished),
+        .flush                (flush),
+        .mmio_flush_entry     (mmio_flush_entry),
+
+        .is_mmio_status_done (all_done)
+    );
+
+    // wire all_done = single_cmd_fifo_empty & ff_empty && cmd_fifo_empty;
 
 
     // Zuoning: pop when IDLE because make sure prev command is done before popping next command
@@ -1173,8 +1682,11 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     `UNUSED_VAR (cmd_fifo_empty);
 
     wire [CCI_DATA_WIDTH-1:0] io_addr_packet_in = ring_buffer_read_data_valid ? ring_buffer_read_data : 0;
+    `UNUSED_VAR (io_addr_packet_in);
     /* verilator lint_off UNUSEDSIGNAL */
     wire [CCI_DATA_WIDTH-1:0] io_addr_packet_out;
+    assign io_addr_packet_out = '0;  // TODO: connect when needed
+    `UNUSED_VAR (io_addr_packet_out);
     reg  [CCI_DATA_WIDTH-1:0] io_addr_packet_out_reg;
     /* verilator lint_on UNUSEDSIGNAL */
     // `UNUSED_VAR (io_addr_packet_in);
@@ -1208,7 +1720,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     // `UNUSED_VAR (ff_empty);
     // `UNUSED_VAR (ff_pop_entry);
 
-    flush_fifo_read_fsm ff_fsm (
+    flush_fifo_read_fsm FF_READ_FSM (
         .clk                  (clk),
         .reset                (reset),
         .flush                (flush),
@@ -1237,9 +1749,10 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     );
 
     
-    wire cmd_fifo_full;
+    wire cmd_fifo_full, cmd_fifo_push;
+    wire [CL_BLOCK_SIZE-1:0] ring_buffer_cache_block, cmd_fifo_cache_block_out;
 
-    cmd_fifo_control_fsm cmd_fifo_fsm (
+    cmd_fifo_control_fsm CMD_FIFO_FSM (
         .clk                  (clk),
         .reset                (reset),
 
@@ -1254,7 +1767,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         .ring_buffer_index_out (rb_index),
         .flush_fifo_pop_out (ff_pop),
         .ring_buffer_read_req_valid_out(ring_buffer_read_req_valid),
-        .ring_buffer_read_pending_out (ring_buffer_read_pending)
+        .ring_buffer_read_pending_out (ring_buffer_read_pending),
+        .ring_buffer_read_data_out(ring_buffer_cache_block)
 
     );
 
@@ -1265,8 +1779,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         .reset    (reset),
         .push     (cmd_fifo_push),
         .pop      (cmd_fifo_pop),
-        .data_in  (io_addr_packet_in),
-        .data_out (io_addr_packet_out),
+        .data_in  (ring_buffer_cache_block),
+        .data_out (cmd_fifo_cache_block_out),
         .empty    (cmd_fifo_empty), 
         .full     (cmd_fifo_full),
 
@@ -1275,6 +1789,95 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         `UNUSED_PIN (alm_full),
         `UNUSED_PIN (size)
     );
+
+
+    wire single_cmd_fifo_full, single_cmd_fifo_empty, single_cmd_fifo_push, single_cmd_valid;
+    // `UNUSED_VAR (single_cmd_fifo_empty);
+    `UNUSED_VAR (single_cmd_valid);
+    wire [31:0] cmd_header_unpacked;  // 32 bits to match cmd_unpack_fsm output
+    wire[CMD_ARG0_WIDTH-1:0] cmd_arg0_unpacked;
+    wire[CMD_ARG1_WIDTH-1:0] cmd_arg1_unpacked;
+    wire[CMD_ARG2_WIDTH-1:0] cmd_arg2_unpacked;
+
+
+    cmd_unpack_fsm CMD_UNPACK_FSM (
+        .clk                  (clk),
+        .reset                (reset),
+        .ring_buffer_cache_block_in (cmd_fifo_cache_block_out),
+        .single_cmd_fifo_full_in(single_cmd_fifo_full),
+        .cmd_fifo_empty_in (cmd_fifo_empty),
+
+        .cmd_fifo_pop_out       (cmd_fifo_pop),
+        .single_cmd_fifo_push_out (single_cmd_fifo_push),
+        .single_cmd_valid_out (single_cmd_valid),
+        .cmd_type_out(cmd_header_unpacked),
+        .cmd_arg0_out (cmd_arg0_unpacked),
+        .cmd_arg1_out (cmd_arg1_unpacked),
+        .cmd_arg2_out (cmd_arg2_unpacked)
+    );
+
+    wire [31:0] cmd_header_single_cmd;  // 32 bits to match FIFO width
+    wire [CMD_ARG0_WIDTH-1:0] cmd_arg0_single_cmd;
+    wire [CMD_ARG1_WIDTH-1:0] cmd_arg1_single_cmd;
+    wire [CMD_ARG2_WIDTH-1:0] cmd_arg2_single_cmd;
+
+    // `UNUSED_VAR (cmd_header_single_cmd);
+    // `UNUSED_VAR (cmd_arg0_single_cmd);
+    // `UNUSED_VAR (cmd_arg1_single_cmd);
+    // `UNUSED_VAR (cmd_arg2_single_cmd);
+
+    wire single_cmd_fifo_pop, single_cmd_valid_dispatched;
+
+    VX_fifo_queue #(
+        .DATAW (32 + CMD_ARG0_WIDTH + CMD_ARG1_WIDTH + CMD_ARG2_WIDTH),  // 32+64+64+64=224 bits
+        .DEPTH (32)
+    ) single_cmd_fifo (
+        .clk      (clk),
+        .reset    (reset),
+        .push     (single_cmd_fifo_push),
+        .pop      (single_cmd_fifo_pop), // NOT YET IMPLEMENTED
+        .data_in  ({cmd_arg2_unpacked, cmd_arg1_unpacked, cmd_arg0_unpacked, cmd_header_unpacked}),
+        .data_out ({cmd_arg2_single_cmd, cmd_arg1_single_cmd, cmd_arg0_single_cmd, cmd_header_single_cmd}),
+        .empty    (single_cmd_fifo_empty), 
+        .full     (single_cmd_fifo_full),
+
+        
+        `UNUSED_PIN (alm_empty),
+        `UNUSED_PIN (alm_full),
+        `UNUSED_PIN (size)
+    );
+
+    /* verilator lint_off UNUSEDSIGNAL */
+    wire[31:0] cmd_header_single_cmd_dispatched;
+    /* verilator lint_on UNUSEDSIGNAL */
+    wire[CMD_ARG0_WIDTH-1:0] cmd_arg0_single_cmd_dispatched;
+    wire[CMD_ARG1_WIDTH-1:0] cmd_arg1_single_cmd_dispatched;
+    wire[CMD_ARG2_WIDTH-1:0] cmd_arg2_single_cmd_dispatched;
+    wire[9:0] num_cmds_finished;
+
+    single_cmd_dispatch_fsm #(
+        .STATE_WIDTH(STATE_WIDTH)
+    ) SINGLE_CMD_DISPATCH_FSM (
+        .clk                  (clk),
+        .reset                (reset),
+        .single_cmd_fifo_empty_in (single_cmd_fifo_empty),
+        .single_cmd_type_in (cmd_header_single_cmd),
+        .single_cmd_arg0_in (cmd_arg0_single_cmd),
+        .single_cmd_arg1_in (cmd_arg1_single_cmd),
+        .single_cmd_arg2_in (cmd_arg2_single_cmd),
+        .state (state),
+        .cmd_done (cmd_done),
+
+        .single_cmd_fifo_pop_out (single_cmd_fifo_pop),
+        .single_cmd_valid_out (single_cmd_valid_dispatched),
+        .single_cmd_type_out(cmd_header_single_cmd_dispatched),
+        .single_cmd_arg0_out (cmd_arg0_single_cmd_dispatched),
+        .single_cmd_arg1_out (cmd_arg1_single_cmd_dispatched),
+        .single_cmd_arg2_out (cmd_arg2_single_cmd_dispatched),
+        .num_cmds_finished_out (num_cmds_finished)
+    );
+
+    
 
     // ZUONING
     // assume this header format
@@ -1295,22 +1898,22 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     assign fifo_cmd_args[2] = use_unpacked ? unpack_cmds[num_cmds_finished_from_cl].arg2 : 64'b0;
 `else
     // Legacy single-command-per-line slicing from kernel FIFO output
-    assign cmd_header = cmd_fifo_pop ? io_addr_packet_out[CMD_HEADER_WIDTH-1:0] : {CMD_HEADER_WIDTH{1'b0}};
-    assign fifo_cmd_args[2] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH+CMD_ARG2_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH];
-    assign fifo_cmd_args[1] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH];
-    assign fifo_cmd_args[0] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH-1:CMD_HEADER_WIDTH];
+    // assign cmd_header = cmd_fifo_pop ? io_addr_packet_out[CMD_HEADER_WIDTH-1:0] : {CMD_HEADER_WIDTH{1'b0}};
+    // assign fifo_cmd_args[2] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH+CMD_ARG2_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH];
+    // assign fifo_cmd_args[1] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH+CMD_ARG1_WIDTH-1:CMD_HEADER_WIDTH+CMD_ARG0_WIDTH];
+    // assign fifo_cmd_args[0] = io_addr_packet_out[CMD_HEADER_WIDTH+CMD_ARG0_WIDTH-1:CMD_HEADER_WIDTH];
 `endif
     
     wire non_empty_cmd_fifo = !cmd_fifo_empty;
     
     // Mux between MMIO and FIFO command arguments
-    assign cmd_args = use_unpacked ? fifo_cmd_args : mmio_cmd_args;
+    assign cmd_args = single_cmd_valid_dispatched ? {cmd_arg2_single_cmd_dispatched, cmd_arg1_single_cmd_dispatched, cmd_arg0_single_cmd_dispatched} : mmio_cmd_args;
     /************* FIFO (Kernel) Module: End here *****************/
 
     /************* Ring Buffer Read Logic: Start here *****************/
     // COMMAND BUFFER:
     // Detect when new commands are available in ring buffer
-    wire ring_buffer_has_data = ring_buffer_num_cmds_remaining > 0 ;
+    // wire ring_buffer_has_data = ring_buffer_num_cmds_remaining > 0 ;
     
     // Calculate host memory address for current ring buffer entry
     // Address = base_addr + (rptr * entry_size)
@@ -2053,6 +2656,20 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
         if (cmd_done && line_active && use_unpacked) begin
             `TRACE(2, ("%t:[ZUONING HW]: num_cmds_finished_from_cl=%d , cmd_type=%d unpack_cmd_count=%d\n", $time, num_cmds_finished_from_cl, cmd_type, unpack_cmd_count));
+        end
+
+        if (cmd_fifo_push) begin
+          `TRACE(2, ("%t:[ZUONING HW]: cmd_fifo_push=1, ring_buffer_cache_block=0x%h\n", $time, ring_buffer_cache_block));
+        end
+
+        if (single_cmd_fifo_push) begin
+            `TRACE(2, ("%t:[ZUONING HW]: single_cmd_fifo_push=1, cmd_type=0x%h, cmd_arg0_unpacked=0x%h, cmd_arg1_unpacked=0x%h, cmd_arg2_unpacked=0x%h\n", $time, cmd_header_unpacked, cmd_arg0_unpacked, cmd_arg1_unpacked, cmd_arg2_unpacked))
+        end
+
+        if (single_cmd_valid_dispatched) begin
+            `TRACE(2, ("%t:[ZUONING HW]: single_cmd_valid_dispatched=1, cmd_header_single_cmd_dispatched=0x%h, cmd_arg0_single_cmd_dispatched=0x%h, cmd_arg1_single_cmd_dispatched=0x%h, cmd_arg2_single_cmd_dispatched=0x%h\n", $time, cmd_header_single_cmd_dispatched, cmd_arg0_single_cmd_dispatched, cmd_arg1_single_cmd_dispatched, cmd_arg2_single_cmd_dispatched))
+
+            `TRACE(2, ("%t:[ZUONING HW]: single_cmd_valid_dispatched=1, cmd_type=0x%h, cmd_args[2]=0x%h, cmd_args[1]=0x%h, cmd_args[0]=0x%h\n", $time, cmd_type, cmd_args[2], cmd_args[1], cmd_args[0]))
         end
         
     end
