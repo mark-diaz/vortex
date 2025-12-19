@@ -91,6 +91,11 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     `UNUSED_PARAM(MMIO_CMD_BUFFER_BASE_ADDR);
     `UNUSED_PARAM(MMIO_CMD_BUFFER_READ_IDX);
 
+    localparam CMD_ARG_WIDTH           = 64;
+    localparam HALF_CMD_ARG_WIDTH      = CMD_ARG_WIDTH / 2;
+
+    localparam FLUSH_QUEUE_DATAW  = CMD_ARG_WIDTH + CCI_ADDR_WIDTH; 
+
     localparam MMIO_STATUS        = `AFU_IMAGE_MMIO_STATUS;
 
     localparam COUT_TID_WIDTH     = `CLOG2(VX_MEM_BYTEEN_WIDTH);
@@ -99,6 +104,8 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     localparam MMIO_DEV_CAPS      = `AFU_IMAGE_MMIO_DEV_CAPS;
     localparam MMIO_ISA_CAPS      = `AFU_IMAGE_MMIO_ISA_CAPS;
+
+    localparam FLUSH_QUEUE_SIZE   = `AFU_IMAGE_FLUSH_QUEUE_SIZE;
 
     localparam CCI_RD_QUEUE_SIZE  = 2 * CCI_RD_WINDOW_SIZE;
     localparam CCI_RD_QUEUE_TAGW  = `CLOG2(CCI_RD_WINDOW_SIZE);
@@ -145,7 +152,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // CMD variables //////////////////////////////////////////////////////////
 
-    wire [2:0][63:0] cmd_args;
+    wire [2:0][CMD_ARG_WIDTH-1:0] cmd_args;
 
     assign cmd_args = '0;
 
@@ -157,6 +164,14 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     wire [VX_DCR_ADDR_WIDTH-1:0] cmd_dcr_addr = VX_DCR_ADDR_WIDTH'(cmd_args[0]);
     wire [VX_DCR_DATA_WIDTH-1:0] cmd_dcr_data = VX_DCR_DATA_WIDTH'(cmd_args[1]);
+
+    // FLUSH variables ////////////////////////////////////////////////////////
+
+    reg flush_fire;
+
+    reg [HALF_CMD_ARG_WIDTH-1:0] flush_num_blocks;
+    reg [HALF_CMD_ARG_WIDTH-1:0] flush_num_commands;
+    reg [CCI_ADDR_WIDTH-1:0]     flush_base_addr;
 
     // MMIO controller ////////////////////////////////////////////////////////
 
@@ -342,23 +357,83 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // Handle MMIO write requests
     always @(posedge clk) begin
-        if (cp2af_sRxPort.c0.mmioWrValid) begin
-            case (mmio_req_hdr.address)
-            `ifdef SCOPE
-            MMIO_SCOPE_WRITE: begin
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_SCOPE_WRITE: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
-            `endif
-            end
-            `endif
-            default: begin
+        if (reset) begin
+            flush_fire <= 0;
+        end
+        else begin
+        
+            flush_fire <= 0;
+
+            if (cp2af_sRxPort.c0.mmioWrValid) begin
+                case (mmio_req_hdr.address)
+                MMIO_CMD_BUFFER_FLUSH: begin
+                    flush_fire <= 1;
+                    flush_num_blocks <= cp2af_sRxPort.c0.data[63:32];
+                    flush_num_commands <= cp2af_sRxPort.c0.data[31:0];
                 `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: Unknown MMIO Wr: addr=0x%0h, data=0x%h\n", $time, mmio_req_hdr.address, 64'(cp2af_sRxPort.c0.data)))
+                    `TRACE(2, ("%t [COMMAND BUFFER HW: MMIO] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_COMMANDS = 0x%h \n", $time, cp2af_sRxPort.c0.data[63:32]))
+                    `TRACE(2, ("%t [COMMAND BUFFER HW: MMIO] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_BLOCKS = 0x%h \n", $time, cp2af_sRxPort.c0.data[31:0]))
                 `endif
+                end
+                MMIO_CMD_BUFFER_BASE_ADDR: begin
+                    flush_base_addr <= CCI_ADDR_WIDTH'(cp2af_sRxPort.c0.data);
+                `ifdef DBG_TRACE_AFU
+                    `TRACE(2, ("%t [COMMAND BUFFER HW: MMIO] AFU: MMIO_CMD_BUFFER_BASE_ADDR: data=0x%h \n", $time, 64'(cp2af_sRxPort.c0.data)))
+                `endif                    
+                end
+                `ifdef SCOPE
+                MMIO_SCOPE_WRITE: begin
+                `ifdef DBG_TRACE_AFU
+                    `TRACE(2, ("%t: AFU: MMIO_SCOPE_WRITE: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
+                `endif
+                end
+                `endif
+                default: begin
+                    `ifdef DBG_TRACE_AFU
+                    `TRACE(2, ("%t: Unknown MMIO Wr: addr=0x%0h, data=0x%h\n", $time, mmio_req_hdr.address, 64'(cp2af_sRxPort.c0.data)))
+                    `endif
+                end
+                endcase
             end
-            endcase
         end
     end
+
+    // FLUSH QUEUE ////////////////////////////////////////////////////////////
+
+    wire [FLUSH_QUEUE_DATAW-1:0] flush_q_din;
+    wire [FLUSH_QUEUE_DATAW-1:0] flush_q_dout;
+    wire flush_q_valid, flush_q_ready;
+    wire cmd_fetch_valid, cmd_fetch_ready;
+
+    assign flush_q_valid = flush_fire;
+
+    assign flush_q_din = {flush_num_blocks, flush_num_commands, flush_base_addr};
+    
+    assign cmd_fetch_ready = cmd_fetch_valid; // TODO: cmd buffer fetch
+
+    `UNUSED_VAR(flush_q_dout)
+    `UNUSED_VAR(flush_q_ready) // Unused because SW will never flush more than FLUSH_QUEUE_SIZE times
+
+    VX_elastic_buffer #(
+        .DATAW   (FLUSH_QUEUE_DATAW),
+        .SIZE    (FLUSH_QUEUE_SIZE),
+        .OUT_REG (0)
+    ) flush_queue (
+        .clk       (clk),
+        .reset     (reset),
+        .valid_in  (flush_q_valid),
+        .ready_in  (flush_q_ready),
+        .data_in   (flush_q_din),
+        .data_out  (flush_q_dout),
+        .valid_out (cmd_fetch_valid),
+        .ready_out (cmd_fetch_ready)
+    );
+
+    // CCI-P Read Request Arbiter /////////////////////////////////////////////
+
+    // COMMAND FETCH //////////////////////////////////////////////////////////
+
+    // COMMAND DECODE /////////////////////////////////////////////////////////
 
     // COMMAND EXECUTE ////////////////////////////////////////////////////////
 
@@ -1031,6 +1106,20 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             if (avs_readdatavalid[i]) begin
                 `TRACE(2, ("%t: AVS Rd Rsp[%0d]: data=0x%h\n", $time, i, avs_readdata[i]))
             end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (flush_fire) begin
+            `TRACE(2, ("%t [COMMAND BUFFER HW] FLUSH_PUSH: din=0x%h  blocks=%0d cmds=%0d base=0x%h\n",
+                $time, flush_q_din, flush_num_blocks, flush_num_commands, flush_base_addr))
+        end
+        if (cmd_fetch_ready && cmd_fetch_valid) begin
+            `TRACE(2, ("%t [COMMAND BUFFER HW] FLUSH_POP: dout=0x%h\n",
+                $time, flush_q_dout))
+        end
+        if (reset) begin
+            `TRACE(2, ("%t [AFU] RESET\n", $time))            
         end
     end
 `endif
