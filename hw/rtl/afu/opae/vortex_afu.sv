@@ -19,7 +19,8 @@
 `include "vortex_afu.vh"
 `endif
 
-`include "command_execute.sv"
+`include "mmio_controller.sv"
+`include "command_dispatch.sv"
 `include "ccip_read_req.sv"
 `include "ccip_write_req.sv"
 
@@ -74,9 +75,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam CCI_RD_WINDOW_SIZE = 8;
     localparam CCI_RW_PENDING_SIZE= 256;
 
-    localparam AFU_ID_L           = 16'h0002;      // AFU ID Lower
-    localparam AFU_ID_H           = 16'h0004;      // AFU ID Higher
-
     localparam CMD_IDLE           = 0;
     localparam CMD_MEM_READ       = `AFU_IMAGE_CMD_MEM_READ;
     localparam CMD_MEM_WRITE      = `AFU_IMAGE_CMD_MEM_WRITE;
@@ -84,13 +82,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam CMD_RUN            = `AFU_IMAGE_CMD_RUN;
     localparam CMD_TYPE_WIDTH     = `CLOG2(`AFU_IMAGE_CMD_MAX_VALUE+1);
     
-    localparam MMIO_CMD_BUFFER_FLUSH     = `AFU_IMAGE_MMIO_CMD_BUFFER_FLUSH;
-    localparam MMIO_CMD_BUFFER_BASE_ADDR = `AFU_IMAGE_MMIO_CMD_BUFFER_BASE_ADDR;
-    localparam MMIO_CMD_BUFFER_READ_IDX  = `AFU_IMAGE_MMIO_CMD_BUFFER_READ_IDX;
-    `UNUSED_PARAM(MMIO_CMD_BUFFER_FLUSH);
-    `UNUSED_PARAM(MMIO_CMD_BUFFER_BASE_ADDR);
-    `UNUSED_PARAM(MMIO_CMD_BUFFER_READ_IDX);
-
     localparam CMD_ARG_WIDTH           = 64;
     localparam HALF_CMD_ARG_WIDTH      = CMD_ARG_WIDTH / 2;
 
@@ -101,9 +92,6 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     localparam COUT_TID_WIDTH     = `CLOG2(VX_MEM_BYTEEN_WIDTH);
     localparam COUT_QUEUE_DATAW   = COUT_TID_WIDTH + 8;
     localparam COUT_QUEUE_SIZE    = 1024;
-
-    localparam MMIO_DEV_CAPS      = `AFU_IMAGE_MMIO_DEV_CAPS;
-    localparam MMIO_ISA_CAPS      = `AFU_IMAGE_MMIO_ISA_CAPS;
 
     localparam FLUSH_QUEUE_SIZE   = `AFU_IMAGE_FLUSH_QUEUE_SIZE;
 
@@ -167,25 +155,13 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // FLUSH variables ////////////////////////////////////////////////////////
 
-    reg flush_fire;
+    wire flush_fire;
 
-    reg [HALF_CMD_ARG_WIDTH-1:0] flush_num_blocks;
-    reg [HALF_CMD_ARG_WIDTH-1:0] flush_num_commands;
-    reg [CCI_ADDR_WIDTH-1:0]     flush_base_addr;
-
-    // MMIO controller ////////////////////////////////////////////////////////
-
-    t_ccip_c0_ReqMmioHdr mmio_req_hdr;
-    assign mmio_req_hdr = t_ccip_c0_ReqMmioHdr'(cp2af_sRxPort.c0.hdr[$bits(t_ccip_c0_ReqMmioHdr)-1:0]);
-    `UNUSED_VAR (mmio_req_hdr)
-
-    t_if_ccip_c2_Tx mmio_rsp;
-    assign af2cp_sTxPort.c2 = mmio_rsp;
+    wire [HALF_CMD_ARG_WIDTH-1:0] flush_num_blocks;
+    wire [HALF_CMD_ARG_WIDTH-1:0] flush_num_commands;
+    wire [CCI_ADDR_WIDTH-1:0]     flush_base_addr;
 
 `ifdef SCOPE
-
-    localparam MMIO_SCOPE_READ  = `AFU_IMAGE_MMIO_SCOPE_READ;
-    localparam MMIO_SCOPE_WRITE = `AFU_IMAGE_MMIO_SCOPE_WRITE;
 
     reg [63:0] cmd_scope_rdata;
     reg [63:0] cmd_scope_wdata;
@@ -286,117 +262,38 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 `endif
 
     // MMIO controller ////////////////////////////////////////////////////////
+    t_ccip_c0_ReqMmioHdr mmio_req_hdr;
 
-    // Handle MMIO read requests
-    always @(posedge clk) begin
-        if (reset) begin
-            mmio_rsp.mmioRdValid <= 0;
-            cout_q_id <= 0;
-        end else begin
-            mmio_rsp.mmioRdValid <= cp2af_sRxPort.c0.mmioRdValid;
-        end
+    assign mmio_req_hdr = t_ccip_c0_ReqMmioHdr'(cp2af_sRxPort.c0.hdr[$bits(t_ccip_c0_ReqMmioHdr)-1:0]);
+    `UNUSED_VAR (mmio_req_hdr)
 
-        mmio_rsp.hdr.tid <= mmio_req_hdr.tid;
+    mmio_controller # (
+        .STATE_DCR_WRITE    (STATE_DCR_WRITE),
+        .STATE_WIDTH        (STATE_WIDTH),
+        .COUT_QUEUE_DATAW   (COUT_QUEUE_DATAW),
+        .CCI_ADDR_WIDTH     (CCI_ADDR_WIDTH),
+        .HALF_CMD_ARG_WIDTH (HALF_CMD_ARG_WIDTH)
+        ) mmio_controller (
+        .clk                (clk),
+        .reset              (reset),
+        .cp2af_sRxPort_c0   (cp2af_sRxPort.c0),
+        .af2cp_sTxPort_c2   (af2cp_sTxPort.c2),
+        .state              (state),
+        .cout_q_empty_all   (cout_q_empty_all),
+        .cout_q_dout_s      (cout_q_dout_s),
+        .afu_id             (afu_id),
+        .dev_caps           (dev_caps),
+        .isa_caps           (isa_caps),
 
-        if (cp2af_sRxPort.c0.mmioRdValid) begin
-            case (mmio_req_hdr.address)
-            // AFU header
-            16'h0000: mmio_rsp.data <= {
-                4'b0001, // Feature type = AFU
-                8'b0,    // reserved
-                4'b0,    // afu minor revision = 0
-                7'b0,    // reserved
-                1'b1,    // end of DFH list = 1
-                24'b0,   // next DFH offset = 0
-                4'b0,    // afu major revision = 0
-                12'b0    // feature ID = 0
-            };
-            AFU_ID_L: mmio_rsp.data <= afu_id[63:0];   // afu id low
-            AFU_ID_H: mmio_rsp.data <= afu_id[127:64]; // afu id hi
-            16'h0006: mmio_rsp.data <= 64'h0; // next AFU
-            16'h0008: mmio_rsp.data <= 64'h0; // reserved
-            MMIO_STATUS: begin
-                mmio_rsp.data <= 64'({cout_q_dout_s, ~cout_q_empty_all, 8'(state)});
-            `ifdef DBG_TRACE_AFU
-                if (state != STATE_WIDTH'(mmio_rsp.data)) begin
-                    `TRACE(2, ("%t: AFU: MMIO_STATUS: addr=0x%0h, state=%0d\n", $time, mmio_req_hdr.address, state))
-                end
-            `endif
-            end
-            `ifdef SCOPE
-            MMIO_SCOPE_READ: begin
-                mmio_rsp.data <= cmd_scope_rdata;
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_SCOPE_READ: data=0x%h\n", $time, cmd_scope_rdata))
-            `endif
-            end
-            `endif
-            MMIO_DEV_CAPS: begin
-                mmio_rsp.data <= dev_caps;
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: MMIO_DEV_CAPS: data=0x%h\n", $time, dev_caps))
-            `endif
-            end
-            MMIO_ISA_CAPS: begin
-                mmio_rsp.data <= isa_caps;
-            `ifdef DBG_TRACE_AFU
-                if (state != STATE_WIDTH'(mmio_rsp.data)) begin
-                    `TRACE(2, ("%t: AFU: MMIO_ISA_CAPS: data=%0d\n", $time, isa_caps))
-                end
-            `endif
-            end
-            default: begin
-                mmio_rsp.data <= 64'h0;
-            `ifdef DBG_TRACE_AFU
-                `TRACE(2, ("%t: AFU: Unknown MMIO Rd: addr=0x%0h\n", $time, mmio_req_hdr.address))
-            `endif
-            end
-            endcase
-        end
-    end
+    `ifdef SCOPE
+        .cmd_scope_rdata    (cmd_scope_rdata),
+    `endif
 
-    // Handle MMIO write requests
-    always @(posedge clk) begin
-        if (reset) begin
-            flush_fire <= 0;
-        end
-        else begin
-        
-            flush_fire <= 0;
-
-            if (cp2af_sRxPort.c0.mmioWrValid) begin
-                case (mmio_req_hdr.address)
-                MMIO_CMD_BUFFER_FLUSH: begin
-                    flush_fire <= 1;
-                    flush_num_blocks <= cp2af_sRxPort.c0.data[63:32];
-                    flush_num_commands <= cp2af_sRxPort.c0.data[31:0];
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t [COMMAND BUFFER HW: MMIO] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_COMMANDS = 0x%h \n", $time, cp2af_sRxPort.c0.data[63:32]))
-                    `TRACE(2, ("%t [COMMAND BUFFER HW: MMIO] AFU: MMIO_CMD_BUFFER_FLUSH: NUM_BLOCKS = 0x%h \n", $time, cp2af_sRxPort.c0.data[31:0]))
-                `endif
-                end
-                MMIO_CMD_BUFFER_BASE_ADDR: begin
-                    flush_base_addr <= CCI_ADDR_WIDTH'(cp2af_sRxPort.c0.data);
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t [COMMAND BUFFER HW: MMIO] AFU: MMIO_CMD_BUFFER_BASE_ADDR: data=0x%h \n", $time, 64'(cp2af_sRxPort.c0.data)))
-                `endif                    
-                end
-                `ifdef SCOPE
-                MMIO_SCOPE_WRITE: begin
-                `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t: AFU: MMIO_SCOPE_WRITE: data=0x%h\n", $time, 64'(cp2af_sRxPort.c0.data)))
-                `endif
-                end
-                `endif
-                default: begin
-                    `ifdef DBG_TRACE_AFU
-                    `TRACE(2, ("%t: Unknown MMIO Wr: addr=0x%0h, data=0x%h\n", $time, mmio_req_hdr.address, 64'(cp2af_sRxPort.c0.data)))
-                    `endif
-                end
-                endcase
-            end
-        end
-    end
+        .flush_fire         (flush_fire),
+        .flush_num_blocks   (flush_num_blocks),
+        .flush_num_commands (flush_num_commands),
+        .flush_base_addr    (flush_base_addr)
+    );
 
     // FLUSH QUEUE ////////////////////////////////////////////////////////////
 
@@ -435,7 +332,7 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     // COMMAND DECODE /////////////////////////////////////////////////////////
 
-    // COMMAND EXECUTE ////////////////////////////////////////////////////////
+    // COMMAND DISPATCH ///////////////////////////////////////////////////////
 
     wire cmd_mem_rd_done;
     reg  cmd_mem_wr_done;
@@ -447,34 +344,34 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire is_mmio_wr_cmd = 0;
     wire [CMD_TYPE_WIDTH-1:0] cmd_type = is_mmio_wr_cmd ? CMD_TYPE_WIDTH'(cp2af_sRxPort.c0.data) : CMD_TYPE_WIDTH'(CMD_IDLE);
 
-    command_execute #(
-        .CCI_ADDR_WIDTH (CCI_ADDR_WIDTH),
-        .RESET_CTR_WIDTH(RESET_CTR_WIDTH),
-        .STATE_IDLE     (STATE_IDLE),
-        .STATE_MEM_WRITE(STATE_MEM_WRITE),
-        .STATE_MEM_READ (STATE_MEM_READ),
-        .STATE_RUN      (STATE_RUN),
-        .STATE_DCR_WRITE(STATE_DCR_WRITE),
-        .STATE_WIDTH    (STATE_WIDTH),
-        .CMD_MEM_READ   (CMD_MEM_READ),
-        .CMD_MEM_WRITE  (CMD_MEM_WRITE),
-        .CMD_DCR_WRITE  (CMD_DCR_WRITE),
-        .CMD_RUN        (CMD_RUN),
-        .CMD_TYPE_WIDTH (CMD_TYPE_WIDTH)
+    command_dispatch #(
+        .CCI_ADDR_WIDTH  (CCI_ADDR_WIDTH),
+        .RESET_CTR_WIDTH (RESET_CTR_WIDTH),
+        .STATE_IDLE      (STATE_IDLE),
+        .STATE_MEM_WRITE (STATE_MEM_WRITE),
+        .STATE_MEM_READ  (STATE_MEM_READ),
+        .STATE_RUN       (STATE_RUN),
+        .STATE_DCR_WRITE (STATE_DCR_WRITE),
+        .STATE_WIDTH     (STATE_WIDTH),
+        .CMD_MEM_READ    (CMD_MEM_READ),
+        .CMD_MEM_WRITE   (CMD_MEM_WRITE),
+        .CMD_DCR_WRITE   (CMD_DCR_WRITE),
+        .CMD_RUN         (CMD_RUN),
+        .CMD_TYPE_WIDTH  (CMD_TYPE_WIDTH)
     ) command_fsm (
-        .clk            (clk),
-        .reset          (reset),
-        .cmd_type       (cmd_type),
-        .cmd_mem_rd_done(cmd_mem_rd_done),
-        .cmd_mem_wr_done(cmd_mem_wr_done),
-        .vx_busy        (vx_busy),
-        .cmd_io_addr    (cmd_io_addr),
-        .cmd_mem_addr   (cmd_mem_addr),
-        .cmd_data_size  (cmd_data_size),
-        .cmd_dcr_addr   (cmd_dcr_addr),
-        .cmd_dcr_data   (cmd_dcr_data),
-        .output_state   (state),
-        .output_vx_reset(vx_reset)
+        .clk             (clk),
+        .reset           (reset),
+        .cmd_type        (cmd_type),
+        .cmd_mem_rd_done (cmd_mem_rd_done),
+        .cmd_mem_wr_done (cmd_mem_wr_done),
+        .vx_busy         (vx_busy),
+        .cmd_io_addr     (cmd_io_addr),
+        .cmd_mem_addr    (cmd_mem_addr),
+        .cmd_data_size   (cmd_data_size),
+        .cmd_dcr_addr    (cmd_dcr_addr),
+        .cmd_dcr_data    (cmd_dcr_data),
+        .output_state    (state),
+        .output_vx_reset (vx_reset)
     );
 
     // AVS Controller /////////////////////////////////////////////////////////
