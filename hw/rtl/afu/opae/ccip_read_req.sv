@@ -31,7 +31,10 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
     parameter STATE_WIDTH        = `CLOG2(STATE_DCR_WRITE+1),
 
     parameter CMD_MEM_WRITE      = `AFU_IMAGE_CMD_MEM_WRITE,
-    parameter CMD_TYPE_WIDTH     = `CLOG2(`AFU_IMAGE_CMD_MAX_VALUE+1)
+    parameter CMD_TYPE_WIDTH     = `CLOG2(`AFU_IMAGE_CMD_MAX_VALUE+1),
+    parameter HALF_CMD_ARG_WIDTH    = 32,
+    parameter RD_REQ_ARB_DATA_WIDTH = CCI_ADDR_WIDTH + HALF_CMD_ARG_WIDTH + CCI_RD_QUEUE_TAGW + 1
+
 ) (
     // global signals
     input wire clk,
@@ -45,7 +48,6 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
     input  logic [CCI_ADDR_WIDTH-1:0] cmd_data_size,
 
     input  logic                         cci_mem_wr_req_fire,
-    input  logic [CCI_RD_QUEUE_TAGW-1:0] cci_rd_req_tag,
     input  logic [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_tag,
     input  logic                         cci_rd_rsp_fire,
     input  logic                         cci_rdq_pop,
@@ -53,18 +55,22 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
     input  t_ccip_clData c0_data,
     input  logic         c0TxAlmFull,
 
+    // arbiter
+    input logic                              rd_req_ready, // input from read req arbiter
+    output logic                             rd_req_valid, // cci read req fire
+    output logic [RD_REQ_ARB_DATA_WIDTH-1:0] rd_req,
+
     // Output
     output logic [CCI_ADDR_WIDTH-1:0]    output_cci_mem_wr_req_ctr,
     output logic [CCI_ADDR_WIDTH-1:0]    output_cci_mem_wr_req_addr_base,
-    
-    output logic                         output_cci_rd_req_fire,
-    output t_ccip_clAddr                 output_cci_rd_req_addr,
+
     output logic [CCI_ADDR_WIDTH-1:0]    output_cci_rd_req_ctr,
     output logic [CCI_RD_QUEUE_TAGW-1:0] output_cci_rd_rsp_ctr,
     output logic                         output_cmd_mem_wr_done
 );
 
     reg cci_rd_req_valid, cci_rd_req_wait;
+    wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_req_tag;
     wire cci_rd_req_fire;
     reg [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr;
     wire [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr_next;
@@ -87,6 +93,10 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
 
     assign cci_rd_req_fire = cci_rd_req_valid && !(cci_rd_req_wait || cci_pending_reads_full);
     assign cci_rd_req_ctr_next = cci_rd_req_ctr + CCI_ADDR_WIDTH'(cci_rd_req_fire ? 1 : 0);
+    assign cci_rd_req_tag = CCI_RD_QUEUE_TAGW'(cci_rd_req_ctr);
+
+    assign rd_req_valid = (STATE_MEM_WRITE == state); // TODO: maybe consider CCI_RD_RSP_FIRE?
+    assign rd_req = {cci_rd_req_fire, cci_rd_req_addr, CCI_RD_QUEUE_TAGW'(cci_rd_req_ctr), 32'd0};
 
     // VX_pending_size
     VX_pending_size #(
@@ -118,7 +128,11 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
                 cci_rd_req_wait  <= 0;
             end
 
-            cci_rd_req_valid <= (STATE_MEM_WRITE == state) && (cci_rd_req_ctr_next != cmd_data_size) && !c0TxAlmFull;
+            // Backpressure if the read request arbiter is not ready
+            if ((STATE_MEM_WRITE == state) && (cci_rd_req_ctr_next != cmd_data_size) &&
+                !c0TxAlmFull && rd_req_ready) begin
+                cci_rd_req_valid <= 1'b1;
+            end
 
             // Check: Begin or End request batch
             if (cci_rd_req_fire && (cci_rd_req_tag == CCI_RD_QUEUE_TAGW'(CCI_RD_WINDOW_SIZE-1))) begin
@@ -178,8 +192,6 @@ module ccip_read_req import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import 
     assign output_cci_mem_wr_req_ctr = cci_mem_wr_req_ctr;
     assign output_cci_mem_wr_req_addr_base = cci_mem_wr_req_addr_base;
 
-    assign output_cci_rd_req_fire = cci_rd_req_fire;
-    assign output_cci_rd_req_addr = cci_rd_req_addr;
     assign output_cci_rd_req_ctr = cci_rd_req_ctr;
     assign output_cci_rd_rsp_ctr = cci_rd_rsp_ctr;
 

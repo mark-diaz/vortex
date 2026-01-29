@@ -87,6 +87,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     localparam FLUSH_QUEUE_DATAW  = CMD_ARG_WIDTH + CCI_ADDR_WIDTH; 
 
+    localparam RD_REQ_ARB_DATAW = CCI_ADDR_WIDTH + HALF_CMD_ARG_WIDTH + CCI_RD_QUEUE_TAGW + 1; 
+
+    localparam RD_REQ_CLIENT_DISPATCH = 0;
+    localparam RD_REQ_CLIENT_FETCH    = 1;
+
+
     localparam MMIO_STATUS        = `AFU_IMAGE_MMIO_STATUS;
 
     localparam COUT_TID_WIDTH     = `CLOG2(VX_MEM_BYTEEN_WIDTH);
@@ -300,15 +306,12 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     wire [FLUSH_QUEUE_DATAW-1:0] flush_q_din;
     wire [FLUSH_QUEUE_DATAW-1:0] flush_q_dout;
     wire flush_q_valid, flush_q_ready;
-    wire cmd_fetch_valid, cmd_fetch_ready;
+    wire flush_valid, flush_ready;
 
     assign flush_q_valid = flush_fire;
 
     assign flush_q_din = {flush_num_blocks, flush_num_commands, flush_base_addr};
     
-    assign cmd_fetch_ready = cmd_fetch_valid; // TODO: cmd buffer fetch
-
-    `UNUSED_VAR(flush_q_dout)
     `UNUSED_VAR(flush_q_ready) // Unused because SW will never flush more than FLUSH_QUEUE_SIZE times
 
     VX_elastic_buffer #(
@@ -322,13 +325,101 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         .ready_in  (flush_q_ready),
         .data_in   (flush_q_din),
         .data_out  (flush_q_dout),
-        .valid_out (cmd_fetch_valid),
-        .ready_out (cmd_fetch_ready)
+        .valid_out (flush_valid),
+        .ready_out (flush_ready)
     );
 
     // CCI-P Read Request Arbiter /////////////////////////////////////////////
+    
+    wire [1:0] rd_req_valid_in;
+    wire [1:0][RD_REQ_ARB_DATAW-1:0] rd_req_data_in;
+    wire [1:0] rd_req_ready_in;
+
+    wire rd_req_valid_out;
+    wire [RD_REQ_ARB_DATAW-1:0] rd_req_data_out;
+
+    wire rd_req_ready_out;
+    assign rd_req_ready_out = 1'b1; // Backpressure is handled in the read controllers through batching (tags)
+
+    `UNUSED_VAR(rd_req_valid_out);
+    `UNUSED_VAR(rd_req_data_out);
+
+    wire rd_req_sel_out;
+    `UNUSED_VAR(rd_req_sel_out);
+
+    VX_stream_arb #(
+        .NUM_INPUTS (2),
+        .NUM_OUTPUTS(1),
+        .STICKY(1),
+        .DATAW      (RD_REQ_ARB_DATAW),
+        .ARBITER    ("R")
+    ) cci_rd_req_arb (
+        .clk       (clk),
+        .reset     (reset),
+        .valid_in  (rd_req_valid_in),
+        .data_in   (rd_req_data_in),
+        .ready_in  (rd_req_ready_in),
+        .valid_out (rd_req_valid_out),
+        .data_out  (rd_req_data_out),
+        .ready_out (rd_req_ready_out),
+        .sel_out   (rd_req_sel_out)
+    );
 
     // COMMAND FETCH //////////////////////////////////////////////////////////
+
+    wire fetch_rd_req_ready, fetch_rd_req_valid;
+    wire [RD_REQ_ARB_DATAW-1:0] fetch_rd_req;
+
+    assign rd_req_valid_in[RD_REQ_CLIENT_FETCH] = fetch_rd_req_valid;
+    assign rd_req_data_in[RD_REQ_CLIENT_FETCH] = fetch_rd_req;
+    assign fetch_rd_req_ready = rd_req_ready_in[RD_REQ_CLIENT_FETCH];
+   
+    // TODO: think about moving cci select logic above arbiter
+
+    wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_tag;
+    assign cci_rd_rsp_tag = CCI_RD_QUEUE_TAGW'(cp2af_sRxPort.c0.hdr.mdata);
+    wire cci_rd_rsp_fire = cp2af_sRxPort.c0.rspValid
+                        && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE);
+
+    
+    wire [HALF_CMD_ARG_WIDTH-1:0] num_blocks;
+    wire [HALF_CMD_ARG_WIDTH-1:0] num_commands;
+    wire [CCI_ADDR_WIDTH-1:0]     base_addr;
+    assign {num_blocks, num_commands, base_addr} = flush_q_dout;
+
+    command_fetch #(
+        .CCI_ADDR_WIDTH        (CCI_ADDR_WIDTH),
+        .HALF_CMD_ARG_WIDTH    (HALF_CMD_ARG_WIDTH),
+        .CCI_RD_WINDOW_SIZE    (CCI_RD_WINDOW_SIZE),
+        .CCI_RD_QUEUE_SIZE     (CCI_RD_QUEUE_SIZE),
+        .CCI_RD_QUEUE_TAGW     (CCI_RD_QUEUE_TAGW),
+        .RD_REQ_ARB_DATA_WIDTH (RD_REQ_ARB_DATAW)
+    ) command_fetch (
+        // global
+        .clk                (clk),
+        .reset              (reset),
+
+        // flush queue
+        .flush_valid        (flush_valid),
+        .flush_ready        (flush_ready),
+
+        .flush_num_blocks   (num_blocks),
+        .flush_num_commands (num_commands),
+        .flush_base_addr    (base_addr),
+
+        // arbiter interface (client 2)
+        .rd_req_ready       (fetch_rd_req_ready),
+        .rd_req_valid       (fetch_rd_req_valid),
+        .rd_req             (fetch_rd_req),
+
+        // CCI response tracking
+        .cci_rd_rsp_fire    (cci_rd_rsp_fire),
+        .cci_rd_rsp_tag     (cci_rd_rsp_tag),
+        .cci_rdq_pop        (cci_rdq_pop),
+        .c0_data            (cp2af_sRxPort.c0.data),
+        .c0TxAlmFull        (cp2af_sRxPort.c0TxAlmFull)
+    );
+
 
     // COMMAND DECODE /////////////////////////////////////////////////////////
 
@@ -613,37 +704,43 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
     );
 
     // CCI-P Read Request /////////////////////////////////////////////////////
+    
+    wire dispatch_rd_req_valid, dispatch_rd_req_ready;
+    wire [RD_REQ_ARB_DATAW-1:0] dispatch_rd_req;
+
+    assign rd_req_valid_in[RD_REQ_CLIENT_DISPATCH] = dispatch_rd_req_valid;
+    assign rd_req_data_in [RD_REQ_CLIENT_DISPATCH] = dispatch_rd_req;
+    assign dispatch_rd_req_ready                   = rd_req_ready_in[RD_REQ_CLIENT_DISPATCH];
+
+    // Core Cache Interface Select Logic
+    wire cci_rd_req_fire;
+    t_ccip_clAddr cci_rd_req_addr;
+    wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_req_tag;
+    wire [HALF_CMD_ARG_WIDTH-1:0] rd_req_num_commands;
+    
+    assign {cci_rd_req_fire, cci_rd_req_addr, cci_rd_req_tag, rd_req_num_commands} = rd_req_data_out;
+    `UNUSED_VAR (rd_req_num_commands)
+
+    always @(*) begin
+        af2cp_sTxPort.c0.valid       = cci_rd_req_fire; // cci_rd_req_fire
+        af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
+        af2cp_sTxPort.c0.hdr.address = cci_rd_req_addr;
+        af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'(cci_rd_req_tag);
+    end
 
     reg [CCI_ADDR_WIDTH-1:0] cci_mem_wr_req_ctr;
     wire [CCI_ADDR_WIDTH-1:0] cci_mem_wr_req_addr;
     reg [CCI_ADDR_WIDTH-1:0] cci_mem_wr_req_addr_base;
 
-    wire cci_rd_req_fire;
-    t_ccip_clAddr cci_rd_req_addr;
     reg [CCI_ADDR_WIDTH-1:0] cci_rd_req_ctr;
-    wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_req_tag;
 
-    wire [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_tag;
     reg [CCI_RD_QUEUE_TAGW-1:0] cci_rd_rsp_ctr;
 
     wire cci_rdq_push, cci_rdq_pop;
     wire [CCI_RD_QUEUE_DATAW-1:0] cci_rdq_din;
     wire cci_rdq_empty;
 
-    always @(*) begin
-        af2cp_sTxPort.c0.valid       = cci_rd_req_fire;
-        af2cp_sTxPort.c0.hdr         = t_ccip_c0_ReqMemHdr'(0);
-        af2cp_sTxPort.c0.hdr.address = cci_rd_req_addr;
-        af2cp_sTxPort.c0.hdr.mdata   = t_ccip_mdata'(cci_rd_req_tag);
-    end
-
     wire cci_mem_wr_req_fire = cci_mem_wr_req_valid && cci_mem_req_ready;
-
-    wire cci_rd_rsp_fire = cp2af_sRxPort.c0.rspValid
-                        && (cp2af_sRxPort.c0.hdr.resp_type == eRSP_RDLINE);
-
-    assign cci_rd_req_tag = CCI_RD_QUEUE_TAGW'(cci_rd_req_ctr);
-    assign cci_rd_rsp_tag = CCI_RD_QUEUE_TAGW'(cp2af_sRxPort.c0.hdr.mdata);
 
     assign cci_rdq_push = cci_rd_rsp_fire;
     assign cci_rdq_pop  = cci_mem_wr_req_fire;
@@ -658,19 +755,19 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
 
     ccip_read_req #(
 
-        .CCI_RD_WINDOW_SIZE (CCI_RD_WINDOW_SIZE),
-        .CCI_ADDR_WIDTH     (CCI_ADDR_WIDTH),
-        .CCI_RD_QUEUE_SIZE  (CCI_RD_QUEUE_SIZE),
-        .CCI_RD_QUEUE_TAGW  (CCI_RD_QUEUE_TAGW),
+        .CCI_RD_WINDOW_SIZE    (CCI_RD_WINDOW_SIZE),
+        .CCI_ADDR_WIDTH        (CCI_ADDR_WIDTH),
+        .CCI_RD_QUEUE_SIZE     (CCI_RD_QUEUE_SIZE),
+        .CCI_RD_QUEUE_TAGW     (CCI_RD_QUEUE_TAGW),
 
-        .STATE_IDLE         (STATE_IDLE),
-        .STATE_MEM_WRITE    (STATE_MEM_WRITE),
-        .STATE_DCR_WRITE    (STATE_DCR_WRITE),
-        .STATE_WIDTH        (STATE_WIDTH),
+        .STATE_IDLE            (STATE_IDLE),
+        .STATE_MEM_WRITE       (STATE_MEM_WRITE),
+        .STATE_DCR_WRITE       (STATE_DCR_WRITE),
+        .STATE_WIDTH           (STATE_WIDTH),
 
-        .CMD_MEM_WRITE      (CMD_MEM_WRITE),
-        .CMD_TYPE_WIDTH     (CMD_TYPE_WIDTH)
-
+        .CMD_MEM_WRITE         (CMD_MEM_WRITE),
+        .CMD_TYPE_WIDTH        (CMD_TYPE_WIDTH),
+        .RD_REQ_ARB_DATA_WIDTH (RD_REQ_ARB_DATAW)
     ) ccip_read_controller (
 
         .clk                (clk),
@@ -683,19 +780,20 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
         .cmd_data_size      (cmd_data_size),
 
         .cci_mem_wr_req_fire(cci_mem_wr_req_fire),
-        .cci_rd_req_tag     (cci_rd_req_tag),
         .cci_rd_rsp_tag     (cci_rd_rsp_tag),
         .cci_rd_rsp_fire    (cci_rd_rsp_fire),
         .cci_rdq_pop        (cci_rdq_pop),
 
         .c0_data            (cp2af_sRxPort.c0.data),
         .c0TxAlmFull        (cp2af_sRxPort.c0TxAlmFull),
+        
+        .rd_req_ready       (dispatch_rd_req_ready),
+        .rd_req_valid       (dispatch_rd_req_valid),
+        .rd_req             (dispatch_rd_req),
 
         .output_cci_mem_wr_req_ctr       (cci_mem_wr_req_ctr),
         .output_cci_mem_wr_req_addr_base (cci_mem_wr_req_addr_base),
-
-        .output_cci_rd_req_fire          (cci_rd_req_fire),
-        .output_cci_rd_req_addr          (cci_rd_req_addr),
+        
         .output_cci_rd_req_ctr           (cci_rd_req_ctr),
         .output_cci_rd_rsp_ctr           (cci_rd_rsp_ctr),
         .output_cmd_mem_wr_done          (cmd_mem_wr_done)
@@ -1011,9 +1109,17 @@ module vortex_afu import ccip_if_pkg::*; import local_mem_cfg_pkg::*; import VX_
             `TRACE(2, ("%t [COMMAND BUFFER HW] FLUSH_PUSH: din=0x%h  blocks=%0d cmds=%0d base=0x%h\n",
                 $time, flush_q_din, flush_num_blocks, flush_num_commands, flush_base_addr))
         end
-        if (cmd_fetch_ready && cmd_fetch_valid) begin
+        if (flush_ready && flush_valid) begin
             `TRACE(2, ("%t [COMMAND BUFFER HW] FLUSH_POP: dout=0x%h\n",
                 $time, flush_q_dout))
+        end
+        if (fetch_rd_req_ready && fetch_rd_req_valid) begin
+            `TRACE(2, ("%t [COMMAND BUFFER HW] FETCH GRANT: dout=0x%h\n",
+                $time, fetch_rd_req))
+        end
+        if (dispatch_rd_req_ready && dispatch_rd_req_valid) begin
+            `TRACE(2, ("%t [COMMAND BUFFER HW] DISPATCH GRANT: dout=0x%h\n",
+                $time, dispatch_rd_req))
         end
         if (reset) begin
             `TRACE(2, ("%t [AFU] RESET\n", $time))            
