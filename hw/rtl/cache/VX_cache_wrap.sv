@@ -15,6 +15,7 @@
 
 module VX_cache_wrap import VX_gpu_pkg::*; #(
     parameter `STRING INSTANCE_ID    = "",
+    parameter IS_LLC                 = 0,
 
     parameter TAG_SEL_IDX           = 0,
 
@@ -110,6 +111,8 @@ module VX_cache_wrap import VX_gpu_pkg::*; #(
     if (BYPASS_ENABLE) begin : g_bypass
 
         VX_cache_bypass #(
+            .IS_LLC       (IS_LLC),
+
             .NUM_REQS          (NUM_REQS),
             .MEM_PORTS         (MEM_PORTS),
             .TAG_SEL_IDX       (TAG_SEL_IDX),
@@ -161,6 +164,7 @@ module VX_cache_wrap import VX_gpu_pkg::*; #(
 
         VX_cache #(
             .INSTANCE_ID  (INSTANCE_ID),
+            .IS_LLC       (IS_LLC),
             .CACHE_SIZE   (CACHE_SIZE),
             .LINE_SIZE    (LINE_SIZE),
             .NUM_BANKS    (NUM_BANKS),

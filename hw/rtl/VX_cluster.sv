@@ -85,6 +85,7 @@ module VX_cluster import VX_gpu_pkg::*; #(
 
     VX_cache_wrap #(
         .INSTANCE_ID    (`SFORMATF(("%s-l2cache", INSTANCE_ID))),
+        .IS_LLC         (!`L3_ENABLED && `L2_ENABLED),
         .CACHE_SIZE     (`L2_CACHE_SIZE),
         .LINE_SIZE      (`L2_LINE_SIZE),
         .NUM_BANKS      (`L2_NUM_BANKS),

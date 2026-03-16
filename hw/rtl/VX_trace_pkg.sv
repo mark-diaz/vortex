@@ -195,6 +195,31 @@ package VX_trace_pkg;
                     INST_LSU_SW: `TRACE(level, ("SW"))
                     INST_LSU_SD: `TRACE(level, ("SD"))
                     INST_LSU_FENCE:`TRACE(level,("FENCE"))
+                    // === CORRECTED AMO TRACES ===
+                    INST_LSU_AMO_LR:    `TRACE(level, ("LR.W"))
+                    INST_LSU_AMO_SC:    `TRACE(level, ("SC.W"))
+                    
+                    INST_LSU_AMO_ARITH: begin
+                        case (op_args.lsu.amo_op)
+                            AMO_ADD:  `TRACE(level, ("AMOADD.W"))
+                            AMO_MIN:  `TRACE(level, ("AMOMIN.W"))
+                            AMO_MAX:  `TRACE(level, ("AMOMAX.W"))
+                            AMO_MINU: `TRACE(level, ("AMOMINU.W"))
+                            AMO_MAXU: `TRACE(level, ("AMOMAXU.W"))
+                            default:  `TRACE(level, ("?"))
+                        endcase
+                    end
+
+                    INST_LSU_AMO_LOGIC: begin
+                        case (op_args.lsu.amo_op)
+                            AMO_SWAP: `TRACE(level, ("AMOSWAP.W"))
+                            AMO_AND:  `TRACE(level, ("AMOAND.W"))
+                            AMO_OR:   `TRACE(level, ("AMOOR.W"))
+                            AMO_XOR:  `TRACE(level, ("AMOXOR.W"))
+                            default:  `TRACE(level, ("?"))
+                        endcase
+                    end
+
                     default:     `TRACE(level, ("?"))
                 endcase
             end

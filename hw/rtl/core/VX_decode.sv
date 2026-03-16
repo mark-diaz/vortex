@@ -84,6 +84,11 @@ module VX_decode import VX_gpu_pkg::*; #(
     wire [11:0] s_imm   = {funct7, rd};
     wire [12:0] b_imm   = {instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
     wire [20:0] jal_imm = {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+       
+    // Extract instruction fields
+    wire [4:0] amo_funct5 = instr[31:27];
+    wire aq_bit = instr[26];
+    wire rl_bit = instr[25];
 
     reg [INST_ALU_BITS-1:0] r_type;
     always @(*) begin
@@ -156,6 +161,58 @@ module VX_decode import VX_gpu_pkg::*; #(
         is_wstall = 0;
 
         case (opcode)
+            INST_AMO: begin
+                ex_type = EX_LSU;  // Route to LoadStore Unit
+                
+                case (amo_funct5)
+                    AMO_LR: begin
+                        op_type = INST_OP_BITS'(INST_LSU_AMO_LR);
+                        `USED_IREG(rs1); // LR requires rs1 as address
+                    end
+                    AMO_SC: begin
+                        op_type = INST_OP_BITS'(INST_LSU_AMO_SC);
+                        `USED_IREG(rs1); // SC requires rs1 as address
+                        `USED_IREG(rs2); // and rs2 as value to store
+                    end
+                    AMO_ADD,
+                    AMO_MIN,
+                    AMO_MAX,
+                    AMO_MINU,
+                    AMO_MAXU: begin
+                        op_type = INST_OP_BITS'(INST_LSU_AMO_ARITH); // arithmetical AMO ops
+                        `USED_IREG(rs1);
+                        `USED_IREG(rs2);
+                    end
+                    AMO_SWAP,
+                    AMO_XOR,
+                    AMO_AND,
+                    AMO_OR: begin
+                        op_type = INST_OP_BITS'(INST_LSU_AMO_LOGIC); // logical AMO ops
+                        `USED_IREG(rs1);
+                        `USED_IREG(rs2);
+                    end
+                    default: begin
+                        // unknown amo ops, trigger an exception
+                        
+                        ex_type = EX_SFU;
+                        op_type = INST_OP_BITS'(INST_SFU_TMC);
+                    end
+                endcase
+                 `USED_IREG(rd); 
+                
+                // RISC-V Atomics Extension
+                op_args.lsu.is_amo   = 1'b1;
+                op_args.lsu.amo_op   = amo_funct5;
+                op_args.lsu.aq       = aq_bit;
+                op_args.lsu.rl       = rl_bit;
+                op_args.lsu.is_store = (amo_funct5!= AMO_LR); // 1'b0;     // Special request type  // TODO: Check
+                op_args.lsu.is_float = 1'b0;     // Integer atomics
+                op_args.lsu.offset   = 12'b0;    // AMOs don't use immediate offsets
+                                
+                // Control Signals  
+                is_wstall = 0; // is_wstall = 1'b1;    // Stall - atomic ops are long-latency  
+
+            end
             INST_I: begin
                 ex_type = EX_ALU;
                 op_type = INST_OP_BITS'(r_type);
@@ -261,6 +318,7 @@ module VX_decode import VX_gpu_pkg::*; #(
                 op_args.alu.use_PC = 1;
                 op_args.alu.use_imm = 1;
                 op_args.alu.imm = `SEXT(`XLEN, jal_imm);
+                // op_args.lsu.is_amo = 1'b0;
                 is_wstall = 1;
                 `USED_IREG (rd);
             end
@@ -291,6 +349,10 @@ module VX_decode import VX_gpu_pkg::*; #(
             INST_FENCE: begin
                 ex_type = EX_LSU;
                 op_type = INST_LSU_FENCE;
+                op_args.lsu.is_amo   = 1'b0;
+                op_args.lsu.amo_op   = 0; 
+                op_args.lsu.aq       = 0; 
+                op_args.lsu.rl       = 0; 
                 op_args.lsu.is_store = 0;
                 op_args.lsu.is_float = 0;
                 op_args.lsu.offset = 0;
@@ -326,6 +388,11 @@ module VX_decode import VX_gpu_pkg::*; #(
             INST_L: begin
                 ex_type = EX_LSU;
                 op_type = INST_OP_BITS'({1'b0, funct3});
+
+                op_args.lsu.is_amo   = 1'b0;
+                op_args.lsu.amo_op   = 0; 
+                op_args.lsu.aq       = 0; 
+                op_args.lsu.rl       = 0;
                 op_args.lsu.is_store = 0;
                 op_args.lsu.is_float = opcode[2];
                 op_args.lsu.offset = u_12;
@@ -342,6 +409,11 @@ module VX_decode import VX_gpu_pkg::*; #(
             INST_S: begin
                 ex_type = EX_LSU;
                 op_type = INST_OP_BITS'({1'b1, funct3});
+
+                op_args.lsu.is_amo   = 1'b0;
+                op_args.lsu.amo_op   = 0; 
+                op_args.lsu.aq       = 0; 
+                op_args.lsu.rl       = 0;
                 op_args.lsu.is_store = 1;
                 op_args.lsu.is_float = opcode[2];
                 op_args.lsu.offset = s_imm;
@@ -538,6 +610,7 @@ module VX_decode import VX_gpu_pkg::*; #(
                 endcase
             end
             default:;
+                // op_args.lsu.is_amo   = 1'b0;
         endcase
     end
 

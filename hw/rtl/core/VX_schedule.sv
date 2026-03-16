@@ -228,8 +228,16 @@ module VX_schedule import VX_gpu_pkg::*; #(
 
             // activate first warp
             warp_pcs[0]     <= from_fullPC(base_dcrs.startup_addr);
-            active_warps[0] <= 1;
-            thread_masks[0][0] <= 1;
+            // active_warps[0] <= 1;
+           
+           // Make this as a macro to only run when running the Risc-V atomics
+           // Only turn this on when running LR-SC test riscV
+            for (integer i = 0; i < `NUM_WARPS; ++i) begin
+                active_warps[i] <= 1;
+                thread_masks[i][0] <= 1;
+            end
+
+            // thread_masks[0][0] <= 1;
             is_single_warp  <= 1;
         end else begin
             active_warps   <= active_warps_n;

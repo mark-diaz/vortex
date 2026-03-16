@@ -74,6 +74,7 @@ module Vortex import VX_gpu_pkg::*; (
 
     VX_cache_wrap #(
         .INSTANCE_ID    ("l3cache"),
+        .IS_LLC         (`L3_ENABLED),
         .CACHE_SIZE     (`L3_CACHE_SIZE),
         .LINE_SIZE      (`L3_LINE_SIZE),
         .NUM_BANKS      (`L3_NUM_BANKS),
