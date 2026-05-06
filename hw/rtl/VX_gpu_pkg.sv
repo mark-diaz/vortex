@@ -30,6 +30,9 @@ package VX_gpu_pkg;
 	localparam NT_WIDTH = `UP(NT_BITS);
 	localparam NB_WIDTH = `UP(NB_BITS);
 
+    // Define Owner Thread ID Width
+    localparam OWNER_ID_WIDTH = `UP(NC_WIDTH + NW_WIDTH + NT_WIDTH); // SM_ID + Warp_ID + Lane_ID
+
     localparam XLENB    = `XLEN / 8;
 
 	localparam RV_REGS = 32;
@@ -100,7 +103,20 @@ package VX_gpu_pkg;
 
     localparam MEM_REQ_FLAG_FLUSH =  0;
     localparam MEM_REQ_FLAG_IO =     1;
-    localparam MEM_REQ_FLAG_LOCAL =  2; // shoud be last since optional
+
+    // RISC-V Atomics Extension
+`ifdef EXT_A_ENABLE
+    localparam MEM_REQ_FLAG_AMO         = 2;
+    localparam MEM_REQ_FLAG_AMO_OP      = 3;
+    localparam MEM_REQ_FLAG_AMO_OP_BITS = 5;
+    localparam MEM_REQ_FLAG_AQ          = (MEM_REQ_FLAG_AMO_OP + MEM_REQ_FLAG_AMO_OP_BITS); // = 8
+    localparam MEM_REQ_FLAG_RL          = (MEM_REQ_FLAG_AQ + 1);                            // = 9
+    localparam MEM_REQ_FLAG_OWNER_ID    = (MEM_REQ_FLAG_RL + 1);                            // = 10
+    localparam MEM_REQ_FLAG_LOCAL       = (MEM_REQ_FLAG_OWNER_ID + OWNER_ID_WIDTH);
+`else
+    localparam MEM_REQ_FLAG_LOCAL      = 2; // keep original position when AMO disabled
+`endif
+
     localparam MEM_FLAGS_WIDTH = (MEM_REQ_FLAG_LOCAL + `LMEM_ENABLED);
 
     localparam VX_DCR_ADDR_WIDTH = `VX_DCR_ADDR_BITS;
@@ -142,6 +158,27 @@ package VX_gpu_pkg;
     localparam INST_FENCE =      7'b0001111; // Fence instructions
     localparam INST_SYS =        7'b1110011; // system instructions
 
+    ////////////////////////////////////  ATOMIC INSTRUCTIONS  //////////////////////////////////////////
+    // RISC-V Atomics Extension
+    localparam INST_AMO =        7'b0101111;
+    localparam [4:0] AMO_LR      = 5'b00010;
+    localparam [4:0] AMO_SC      = 5'b00011;
+    localparam [4:0] AMO_SWAP    = 5'b00001;
+    localparam [4:0] AMO_ADD     = 5'b00000;
+    localparam [4:0] AMO_XOR     = 5'b00100;
+    localparam [4:0] AMO_AND     = 5'b01100;
+    localparam [4:0] AMO_OR      = 5'b01000;
+    localparam [4:0] AMO_MIN     = 5'b10000;
+    localparam [4:0] AMO_MAX     = 5'b10100;
+    localparam [4:0] AMO_MINU    = 5'b11000;
+    localparam [4:0] AMO_MAXU    = 5'b11100;
+
+    // use the for remaining unused opcodes
+    localparam INST_LSU_AMO_LR    = 4'b0111;  // LR
+    localparam INST_LSU_AMO_SC    = 4'b1100;  // SC
+    localparam INST_LSU_AMO_ARITH = 4'b1101;  // ARITH
+    localparam INST_LSU_AMO_LOGIC = 4'b1110;  // LOGIC
+    
     // RV64I instruction specific opcodes (for any W instruction)
     localparam INST_I_W =        7'b0011011; // W type immediate instructions
     localparam INST_R_W =        7'b0111011; // W type register instructions
@@ -344,6 +381,11 @@ package VX_gpu_pkg;
         return (op[3:2] == 3);
     endfunction
 
+   // use a function to check if an lsu op is amo op
+    function automatic logic inst_lsu_is_amo(input logic [INST_LSU_BITS-1:0] op);
+        return (op == INST_LSU_AMO_LR) || (op == INST_LSU_AMO_SC) || (op == INST_LSU_AMO_ARITH) || (op == INST_LSU_AMO_LOGIC);
+    endfunction
+    
     ///////////////////////////////////////////////////////////////////////////
 
     localparam INST_FPU_ADD =    4'b0000; // SUB=fmt[1]
@@ -509,7 +551,13 @@ package VX_gpu_pkg;
     `PACKAGE_ASSERT($bits(fpu_args_t) == INST_ARGS_BITS)
 
     typedef struct packed {
-        logic [(INST_ARGS_BITS-1-1-OFFSET_BITS)-1:0] __padding;
+        logic [(INST_ARGS_BITS-1-1-OFFSET_BITS-1-5-1-1)-1:0] __padding;
+    
+        // RISC-V Atomics Extension
+        logic       is_amo;    // Atomic flag
+        logic [4:0] amo_op;    // funct5 (LR, SC, SWAP, etc.)
+        logic       aq;        // Acquire bit
+        logic       rl;        // Release bit 
         logic is_store;
         logic is_float;
         logic [OFFSET_BITS-1:0] offset;

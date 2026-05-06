@@ -134,6 +134,7 @@ module VX_socket import VX_gpu_pkg::*; #(
 
     VX_cache_cluster #(
         .INSTANCE_ID    (`SFORMATF(("%s-dcache", INSTANCE_ID))),
+        .IS_LLC         (!`L3_ENABLED && !`L2_ENABLED && `DCACHE_ENABLED),
         .NUM_UNITS      (`NUM_DCACHES),
         .NUM_INPUTS     (`SOCKET_SIZE),
         .TAG_SEL_IDX    (0),

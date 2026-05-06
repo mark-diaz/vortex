@@ -14,6 +14,8 @@
 `include "VX_cache_define.vh"
 
 module VX_cache_bypass import VX_gpu_pkg::*; #(
+    parameter IS_LLC            = 0,
+
     parameter NUM_REQS          = 1,
     parameter MEM_PORTS         = 1,
     parameter TAG_SEL_IDX       = 0,
@@ -72,7 +74,17 @@ module VX_cache_bypass import VX_gpu_pkg::*; #(
 
     for (genvar i = 0; i < NUM_REQS; ++i) begin : g_core_req_is_nc
         if (CACHE_ENABLE) begin : g_cache
+
+        `ifdef EXT_A_ENABLE
+            // Above LLC: AMOs bypass cache (pass through to LLC)
+            // LLC: AMOs go INTO cache (to hit AMO unit)
+            assign core_req_nc_sel[i] = ~core_bus_in_if[i].req_data.flags[MEM_REQ_FLAG_IO]
+                                    & ~(core_bus_in_if[i].req_data.flags[MEM_REQ_FLAG_AMO] 
+                                    & ~IS_LLC);
+        `else
             assign core_req_nc_sel[i] = ~core_bus_in_if[i].req_data.flags[MEM_REQ_FLAG_IO];
+        `endif
+
         end else begin : g_no_cache
             assign core_req_nc_sel[i] = 1'b0;
         end
